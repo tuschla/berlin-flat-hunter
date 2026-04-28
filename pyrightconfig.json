@@ -1,0 +1,16 @@
+{
+  "include": ["berlin_flat_hunter", "tests", "main.py"],
+  "exclude": ["**/__pycache__", ".venv", "**/.*"],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "standard",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none",
+  "reportPrivateUsage": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownParameterType": "none",
+  "reportGeneralTypeIssues": "warning"
+}

@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "berlin-flat-hunter"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "flathunter",
+    "requests",
+    "beautifulsoup4",
+    "selenium",
+    "pyyaml",
+    # flathunter transitive deps (upstream has no install_requires)
+    "backoff",
+    "lxml",
+    "python-dotenv",
+    "requests-random-user-agent",
+    "shapely",
+    "geopy",
+    "undetected-chromedriver",
+    "websockets",
+    "setuptools",  # provides distutils shim required by undetected-chromedriver on Python 3.12+
+    "pydantic",
+    "apprise",  # flathunter notifier
+    "pytz",     # flathunter time zones
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.409",
+    "pytest",
+    "requests-mock",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["berlin_flat_hunter"]
+
+[tool.uv.sources]
+flathunter = { git = "https://github.com/flathunters/flathunter.git" }

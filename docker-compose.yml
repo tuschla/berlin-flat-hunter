@@ -1,0 +1,37 @@
+# Multi-profile setup. Each service is an independent search profile with its
+# own config, DB, stats, and schema-monitor state — fully isolated.
+#
+# Layout:
+#   profiles/
+#     cheap.yaml      # config for profile "cheap"
+#     family.yaml     # config for profile "family"
+#   data/
+#     cheap/          # DB + stats + monitor state for "cheap"
+#     family/         # ditto for "family"
+#
+# Each YAML must set a distinct database_location, e.g.:
+#   database_location: /data/db.sqlite
+# The hunter then writes schema_monitor.json + stats.db next to it.
+
+services:
+  cheap:
+    build: .
+    image: berlin-flat-hunter:latest
+    container_name: bfh-cheap
+    restart: unless-stopped
+    volumes:
+      - ./profiles/cheap.yaml:/config/config.yaml:ro
+      - ./data/cheap:/data
+    # Uncomment to share Ollama from host (host.docker.internal on Mac/Win,
+    # 172.17.0.1 or use network_mode: host on Linux):
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+  family:
+    build: .
+    image: berlin-flat-hunter:latest
+    container_name: bfh-family
+    restart: unless-stopped
+    volumes:
+      - ./profiles/family.yaml:/config/config.yaml:ro
+      - ./data/family:/data

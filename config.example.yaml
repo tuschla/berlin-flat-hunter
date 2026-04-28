@@ -1,0 +1,108 @@
+# All persistent state (DB, stats.db, schema_monitor.json) lives in the directory
+# of database_location. For Docker / multi-profile, point this at a per-profile
+# volume mount (e.g. /data/db.sqlite).
+database_location: ./flathunter.db
+
+urls:
+  - https://www.wbm.de/wohnungen-berlin/angebote/
+  - https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/wohnung/
+  - https://www.gesobau.de/mieten/wohnungssuche.html
+
+# Standard flathunter filters
+filters:
+  max_price: 1200
+  min_rooms: 2
+  max_rooms: 4
+  min_size: 50
+
+# Loop every 5 minutes
+loop:
+  active: true
+  sleeping_time: 300
+
+# Telegram notifications (optional)
+# telegram:
+#   bot_token: "YOUR_BOT_TOKEN"
+#   receiver_ids:
+#     - 123456789
+
+# Polygon search area (optional) — only keep listings whose address falls
+# inside the polygon. Coordinates are [latitude, longitude] pairs; needs at
+# least 3 points. Uses OpenStreetMap Nominatim for geocoding (free).
+# search_area:
+#   polygon:
+#     - [52.540, 13.350]
+#     - [52.540, 13.450]
+#     - [52.490, 13.450]
+#     - [52.490, 13.350]
+
+# Neighborhood (Kiez) filter via postal codes — simpler than polygons:
+# Berlin PLZ cover the whole city without gaps, no geocoding round-trip needed,
+# and matched listings get tagged with `expose["matched_neighborhood"]`.
+# Each name maps to one or more 5-digit PLZ. Listings whose address PLZ is in
+# none of the configured codes are dropped.
+# neighborhoods:
+#   Wrangelkiez:    [10997]
+#   Reuterkiez:     [12047]
+#   Friedrichshain: [10243, 10245, 10247, 10249]
+
+# Ollama AI filter (optional) — drop listings the model says NO to
+ollama:
+  enabled: false
+  url: http://localhost:11434/api/generate
+  model: llama3
+  # prompt: "Custom prompt with {expose} placeholder"
+
+# Auto-apply (optional) — Selenium submits contact forms
+auto_apply:
+  enabled: false
+
+  # When true, fills forms but DOES NOT click submit (verify selectors first).
+  # Strongly recommended on first use — sites change form structure regularly.
+  dry_run: true
+
+  # Ask Ollama before submitting each application (independent of the listing filter above)
+  ollama_gate: false
+
+  # Which fields to include in the apply-gate prompt (default: all)
+  # ollama_gate_fields: [title, address, rooms, size, price, url, description]
+
+  # Override the model used for apply decisions (defaults to ollama.model)
+  # ollama_gate_model: llama3
+
+  # Custom prompt — must contain {expose} placeholder
+  # ollama_gate_prompt: |
+  #   You are helping me find my next Berlin apartment.
+  #   Should I apply for this listing? Reply YES or NO only.
+  #   {expose}
+
+applicant:
+  name: "Max Mustermann"             # "Vorname Nachname" — auto-split for WBM
+  email: "max@example.com"
+  phone: "+49 30 1234567"
+  message: "Ich interessiere mich sehr für diese Wohnung und würde mich über einen Besichtigungstermin freuen."
+  # WBM forms require current address (Straße + PLZ + Ort) for WBS verification.
+  street: "Musterstraße 1"
+  postal_code: "10115"
+  city: "Berlin"
+  # Kleinanzeigen login. kleinanzeigen_email falls back to `email` above when omitted.
+  # kleinanzeigen_email: "different@example.com"   # optional override
+  # kleinanzeigen_password: "secret"
+
+# Schema change monitoring — alert when a crawler stops returning results
+# or when critical fields (title, address, price) are missing from responses.
+monitoring:
+  # Alert after this many consecutive runs with 0 results (default: 3)
+  consecutive_empty_threshold: 3
+  # Alert if this fraction of results are missing critical fields (default: 0.5)
+  field_miss_threshold: 0.5
+  # When true, schema alerts are also pushed through your configured notifiers
+  # (whichever names are listed under `notifiers:` — apprise, telegram, slack,
+  # mattermost). Default: alerts go to the log only.
+  alert_via_notifiers: false
+
+# Statistics logging — log each unique apartment notice to a SQLite DB for trend analysis.
+# DB tracks first-seen timestamp per listing; query via StatsLogger API.
+statistics:
+  enabled: false
+  # db_path: "stats.db"   # defaults to alongside the main DB
