@@ -1,0 +1,17 @@
+[Unit]
+Description=berlin-flat-hunter — single profile (≤€600, 1 room)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/berlin-flat-hunter
+ExecStart=/root/.local/bin/uv run python main.py --config profiles/single.yaml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+# Containerised host: no User=, no Hardening lines that touch namespaces —
+# they fight with rootless container restrictions.
+
+[Install]
+WantedBy=multi-user.target

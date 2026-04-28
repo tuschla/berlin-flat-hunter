@@ -3,38 +3,37 @@
 #
 # Layout:
 #   profiles/
-#     cheap.yaml      # config for profile "cheap"
-#     family.yaml     # config for profile "family"
+#     single.yaml     # solo flat, ≤€600, 1 room
+#     wg.yaml         # WG/2-room flat, ≤€1100
 #   data/
-#     cheap/          # DB + stats + monitor state for "cheap"
-#     family/         # ditto for "family"
+#     single/         # DB + stats + monitor state for "single"
+#     wg/             # ditto for "wg"
 #
-# Each YAML must set a distinct database_location, e.g.:
-#   database_location: /data/db.sqlite
-# The hunter then writes schema_monitor.json + stats.db next to it.
+# Each YAML sets `database_location: /data/db.sqlite` so files land in the
+# per-profile volume and never collide.
 
 services:
-  cheap:
+  single:
     build: .
     image: berlin-flat-hunter:latest
-    container_name: bfh-cheap
+    container_name: bfh-single
     restart: unless-stopped
     volumes:
-      - ./profiles/cheap.yaml:/config/config.yaml:ro
-      - ./data/cheap:/data
+      - ./profiles/single.yaml:/config/config.yaml:ro
+      - ./data/single:/data
     # Uncomment to share Ollama from host (host.docker.internal on Mac/Win,
     # 172.17.0.1 or use network_mode: host on Linux):
     # extra_hosts:
     #   - "host.docker.internal:host-gateway"
 
-  family:
+  wg:
     build: .
     image: berlin-flat-hunter:latest
-    container_name: bfh-family
+    container_name: bfh-wg
     restart: unless-stopped
     volumes:
-      - ./profiles/family.yaml:/config/config.yaml:ro
-      - ./data/family:/data
+      - ./profiles/wg.yaml:/config/config.yaml:ro
+      - ./data/wg:/data
 
   # Hands-off auto-apply profile. Builds the runtime-vnc Dockerfile target
   # so Chrome runs *headed* inside Xvfb, the profile dir persists across
