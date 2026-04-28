@@ -17,7 +17,13 @@ WP_API_URL = "https://www.gewobag.de/wp-json/wp/v2/immobilien"
 
 # Substrings (lowercased, ä→ae normalised) that mark a non-apartment listing.
 # German plurals umlautify the stem (Stellplatz → Stellplätze → "stellplaetze"),
-# so we need both the singular stem and the plural stem.
+# so we need both the singular and the plural stem. We also intentionally
+# match these as plain substrings — *not* word-boundary regex — because German
+# noun compounding glues stems onto a head ("Behindertenparkplatz",
+# "Tiefgaragenstellplatz") and the stem we want to skip on can land anywhere
+# inside the compound. Real Gewobag listing titles are noun phrases (not verb
+# forms like "Aufladen"), so the loose match has a near-zero false-positive
+# rate in practice.
 _SKIP_KEYWORDS = frozenset([
     "stellplatz", "stellplaetz",
     "parkplatz", "parkplaetz",

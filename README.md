@@ -62,17 +62,24 @@ docker compose up -d
 ```
 
 
-## Status (verified live 2026-04-26)
+## Status (verified live 2026-04-28)
 
 | Crawler | Crawl | Auto-apply |
 |---|---|---|
-| Gewobag | ✅ 36 listings | ⚠ contact form is JS-rendered behind a button click; selectors are best-effort. **Use `dry_run: true` first.** |
+| Gewobag | ✅ ~36 listings | ⚠ form is an `app.wohnungshelden.de` Angular/NG-ZORRO SPA loaded via `iframe#contact-iframe`. We extract the iframe `src` and drive the SPA standalone, filling 9 fields (firstName/lastName/email/phoneNumber/message + street/houseNumber/zipCode/city). **Live submit is blocked by reCAPTCHA** — the applicator detects and aborts cleanly, logging the reason. `dry_run: true` works end-to-end (verified live 2026-04-28). |
 | WBM | ✅ 7 listings | ⚠ powermail form requires WBS info + privacy checkbox; we fill basic contact fields only. **Use `dry_run: true` first.** |
 | Gesobau | ✅ 6 listings | not implemented |
 | Kleinanzeigen | ✅ 27 listings | ⚠ requires login; selectors are best-effort. **Use `dry_run: true` first.** |
 | ImmobilienScout24 | ✅ via flathunter | ❌ not implemented (heavy anti-bot) |
 | Immowelt | ❌ DataDome 403 — flathunter HTTP-only crawler can't bypass currently | ❌ not implemented |
 | WG-Gesucht, Idealista, Subito, Immobiliare, VrmImmo | via flathunter | ❌ not implemented |
+
+When auto-apply silently degrades (selectors stale on a site after a redesign),
+the AutoApplicator counts consecutive URL-matched failures per site and pushes
+a `[APPLICATOR ALERT] <Site>: N consecutive auto-apply failures …` message
+through the same notifier chain used for schema alerts (enable
+`monitoring.alert_via_notifiers: true` to receive it). Counter resets on the
+next successful submission; cooldown is 1h to avoid spam.
 
 **Auto-apply is best-effort.** Form structures change regularly. Always run with
 `auto_apply.dry_run: true` first to verify selectors match — it fills forms

@@ -16,9 +16,12 @@ class OllamaClient:
         self.timeout = timeout
 
     def ask_yes_no(self, prompt: str, default: bool = True, context: str = "ollama") -> bool:
-        """Ask Ollama a question; return True if response starts with YES.
+        """Ask Ollama a question; return True if the answer parses as YES,
+        False if it parses as NO, ``default`` for unrecognised replies.
 
-        On network, HTTP, or JSON-parse error, falls back to ``default``.
+        On network, HTTP, or JSON-parse error also falls back to ``default``.
+        Treating unrecognised replies (``"Maybe"``, ``"It depends..."``) as
+        the configured default keeps the fail-open semantics callers rely on.
         """
         try:
             resp = requests.post(
@@ -40,6 +43,12 @@ class OllamaClient:
             logger.warning("%s response missing 'response' string; falling back to %s",
                            context, default)
             return default
-        answer = answer.strip().upper()
-        logger.debug("%s verdict: %s", context, answer)
-        return answer.startswith("YES")
+        normalised = answer.strip().upper()
+        logger.debug("%s verdict: %s", context, normalised)
+        if normalised.startswith("YES"):
+            return True
+        if normalised.startswith("NO"):
+            return False
+        logger.warning("%s reply %r is neither YES nor NO; falling back to %s",
+                       context, answer.strip()[:80], default)
+        return default

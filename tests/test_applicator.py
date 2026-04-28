@@ -6,6 +6,7 @@ from berlin_flat_hunter.applicator import (
     AutoApplicator,
     GewobagApplicator,
     KleinanzeigenApplicator,
+    ManualApplyRequired,
     WbmApplicator,
     _fill_field,
 )
@@ -127,17 +128,20 @@ class TestKleinanzeigenApplicator(unittest.TestCase):
         app = KleinanzeigenApplicator(APPLICANT)
         self.assertFalse(app.apply(GEWOBAG_EXPOSE))
 
-    def test_skips_without_credentials(self):
+    def test_missing_credentials_raises_manual_apply(self):
         app = KleinanzeigenApplicator({"message": "hi"})
-        self.assertFalse(app.apply(KLEINANZEIGEN_EXPOSE))
+        with self.assertRaises(ManualApplyRequired):
+            app.apply(KLEINANZEIGEN_EXPOSE)
 
-    def test_skips_with_only_email(self):
+    def test_only_email_raises_manual_apply(self):
         app = KleinanzeigenApplicator({"kleinanzeigen_email": "u@e.com"})
-        self.assertFalse(app.apply(KLEINANZEIGEN_EXPOSE))
+        with self.assertRaises(ManualApplyRequired):
+            app.apply(KLEINANZEIGEN_EXPOSE)
 
-    def test_skips_with_only_password(self):
+    def test_only_password_raises_manual_apply(self):
         app = KleinanzeigenApplicator({"kleinanzeigen_password": "x"})
-        self.assertFalse(app.apply(KLEINANZEIGEN_EXPOSE))
+        with self.assertRaises(ManualApplyRequired):
+            app.apply(KLEINANZEIGEN_EXPOSE)
 
     def test_falls_back_to_applicant_email(self):
         """When kleinanzeigen_email is not set, fall back to applicant.email."""
@@ -195,6 +199,126 @@ class TestAutoApplicator(unittest.TestCase):
         self.processor.process_expose(dict(WBM_EXPOSE))
         m0.assert_called_once()
         m1.assert_called_once()
+
+
+class TestStaleApplicatorAlerts(unittest.TestCase):
+    """Failure counter + alert dispatch when an applicator's URL matches
+    but apply() keeps returning False (selectors stale)."""
+
+    def setUp(self):
+        self.dispatched: list[list[str]] = []
+        self.processor = AutoApplicator(
+            FakeConfig(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
+        )
+        # Fail every applicator so URL_MATCH counts but no success masks it.
+        for app in self.processor.applicators:
+            app.apply = MagicMock(return_value=False)
+
+    def test_alert_after_threshold_consecutive_failures(self):
+        for _ in range(3):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        self.assertEqual(len(self.dispatched), 1)
+        msg = self.dispatched[0][0]
+        self.assertIn("Gewobag", msg)
+        self.assertIn("APPLICATOR ALERT", msg)
+
+    def test_no_alert_below_threshold(self):
+        for _ in range(2):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        self.assertEqual(self.dispatched, [])
+
+    def test_success_resets_counter(self):
+        for _ in range(2):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        # Now succeed
+        self.processor.applicators[0].apply = MagicMock(return_value=True)
+        self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        # Back to failing — counter starts from 0
+        self.processor.applicators[0].apply = MagicMock(return_value=False)
+        for _ in range(2):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        # Total: 2 fail + 1 success + 2 fail. Below 3 since reset → no alert.
+        self.assertEqual(self.dispatched, [])
+
+    def test_failures_on_non_matching_urls_dont_count(self):
+        """A WBM URL doesn't trigger the Gewobag failure counter even though
+        Gewobag.apply() is invoked first in the loop — its URL_MATCH guard fails."""
+        # Gewobag applicator returns False because URL_MATCH=gewobag.de is
+        # not in the WBM URL — but is_target=False so the counter must NOT tick.
+        for _ in range(5):
+            self.processor.process_expose(dict(WBM_EXPOSE))
+        # WBM applicator URL_MATCHes — its 5 failures should hit threshold once.
+        self.assertEqual(len(self.dispatched), 1)
+        self.assertIn("WBM", self.dispatched[0][0])
+
+    def test_cooldown_blocks_repeat_alert(self):
+        for _ in range(6):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        # 6 failures, but cooldown is 1h — only one alert dispatched.
+        self.assertEqual(len(self.dispatched), 1)
+
+
+class TestManualApplyNotifications(unittest.TestCase):
+    """ManualApplyRequired raises become per-listing notifier dispatches —
+    one per listing, no cooldown, doesn't tick the stale-selector counter."""
+
+    def setUp(self):
+        self.dispatched: list[list[str]] = []
+        self.processor = AutoApplicator(
+            FakeConfig(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
+        )
+
+    def test_recaptcha_dispatches_manual_apply_alert(self):
+        self.processor.applicators[0].apply = MagicMock(
+            side_effect=ManualApplyRequired("reCAPTCHA challenge"))
+        result = self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        self.assertTrue(result.get("manual_apply_required"))
+        self.assertEqual(len(self.dispatched), 1)
+        msg = self.dispatched[0][0]
+        self.assertIn("MANUAL APPLY", msg)
+        self.assertIn("Gewobag", msg)
+        self.assertIn("reCAPTCHA", msg)
+        self.assertIn(GEWOBAG_EXPOSE["url"], msg)
+
+    def test_manual_apply_does_not_tick_stale_counter(self):
+        """A site demanding humans (reCAPTCHA) is not the same as broken
+        selectors — must not eventually fire the [APPLICATOR ALERT]."""
+        self.processor.applicators[0].apply = MagicMock(
+            side_effect=ManualApplyRequired("reCAPTCHA challenge"))
+        for _ in range(5):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        # 5 manual-apply alerts (one per listing) but no stale-selector alert.
+        self.assertEqual(len(self.dispatched), 5)
+        for batch in self.dispatched:
+            self.assertIn("MANUAL APPLY", batch[0])
+            self.assertNotIn("APPLICATOR ALERT", batch[0])
+
+    def test_manual_apply_per_listing_no_cooldown(self):
+        """Manual-apply alerts are per-listing actionable (apply by hand on
+        this URL) — must NOT be deduplicated by a 1h cooldown like stale alerts."""
+        self.processor.applicators[0].apply = MagicMock(
+            side_effect=ManualApplyRequired("reCAPTCHA challenge"))
+        for _ in range(3):
+            self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        self.assertEqual(len(self.dispatched), 3)
+
+    def test_manual_apply_skips_remaining_applicators(self):
+        m0 = self.processor.applicators[0].apply = MagicMock(
+            side_effect=ManualApplyRequired("reCAPTCHA"))
+        m1 = self.processor.applicators[1].apply = MagicMock(return_value=True)
+        self.processor.process_expose(dict(GEWOBAG_EXPOSE))
+        m0.assert_called_once()
+        m1.assert_not_called()
+
+    def test_no_alert_dispatch_callback_still_logs(self):
+        """When alert_dispatch is None the message should still be logged at
+        INFO level — the absence of telegram doesn't mean the user gets nothing."""
+        proc = AutoApplicator(FakeConfig(), alert_dispatch=None)
+        proc.applicators[0].apply = MagicMock(
+            side_effect=ManualApplyRequired("reCAPTCHA"))
+        with self.assertLogs("flathunt", level="INFO") as cm:
+            proc.process_expose(dict(GEWOBAG_EXPOSE))
+        self.assertTrue(any("MANUAL APPLY" in line for line in cm.output))
 
 
 if __name__ == "__main__":

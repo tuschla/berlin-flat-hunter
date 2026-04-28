@@ -29,10 +29,46 @@ class TestPlzFilter(unittest.TestCase):
         out = list(fltr.process_exposes([_expose("Spandauer Str. 1, 13591 Berlin")]))
         self.assertEqual(out, [])
 
-    def test_drops_address_without_plz(self):
+    def test_drops_address_without_plz_or_name(self):
         fltr = PlzFilter(_make_config({"Wrangelkiez": ["10997"]}))
         out = list(fltr.process_exposes([_expose("Some street, Berlin")]))
         self.assertEqual(out, [])
+
+    def test_name_fallback_when_no_plz(self):
+        """Address has no PLZ but contains the neighborhood name — match on name."""
+        fltr = PlzFilter(_make_config({"Friedrichshain": ["10243", "10245"]}))
+        out = list(fltr.process_exposes([_expose("Some street, Friedrichshain, Berlin")]))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["matched_neighborhood"], "Friedrichshain")
+
+    def test_name_fallback_word_boundary(self):
+        """A name that's a substring of another word must NOT match (Mitte vs. Mittelweg)."""
+        fltr = PlzFilter(_make_config({"Mitte": ["10117"]}))
+        out = list(fltr.process_exposes([_expose("Mittelweg 5, Some Other District, Berlin")]))
+        self.assertEqual(out, [])
+
+    def test_name_fallback_case_insensitive(self):
+        fltr = PlzFilter(_make_config({"Friedrichshain": ["10243"]}))
+        out = list(fltr.process_exposes([_expose("FRIEDRICHSHAIN, Berlin")]))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["matched_neighborhood"], "Friedrichshain")
+
+    def test_plz_takes_precedence_over_name(self):
+        """If PLZ is present and doesn't match, listing is dropped even if address mentions a configured name."""
+        fltr = PlzFilter(_make_config({"Friedrichshain": ["10243"]}))
+        out = list(fltr.process_exposes([
+            _expose("Friedrichshain Café, Mitte, 10117 Berlin"),
+        ]))
+        self.assertEqual(out, [])  # PLZ 10117 not in mapping; name fallback only fires if no PLZ
+
+    def test_name_fallback_longest_name_wins(self):
+        """Multi-word names should not be shadowed by sub-name overlap."""
+        fltr = PlzFilter(_make_config({
+            "Berg": ["10119"],
+            "Prenzlauer Berg": ["10405"],
+        }))
+        out = list(fltr.process_exposes([_expose("Some street, Prenzlauer Berg, Berlin")]))
+        self.assertEqual(out[0]["matched_neighborhood"], "Prenzlauer Berg")
 
     def test_multiple_neighborhoods(self):
         fltr = PlzFilter(_make_config({

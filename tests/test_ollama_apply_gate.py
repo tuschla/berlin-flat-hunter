@@ -64,9 +64,11 @@ class TestOllamaApplyGate(unittest.TestCase):
         self.assertTrue(self._gate().should_apply(EXPOSE))
 
     @patch("berlin_flat_hunter.ollama_client.requests.post")
-    def test_empty_response_returns_false(self, mock_post):
+    def test_empty_response_returns_default(self, mock_post):
+        """Empty/unparseable reply → fail-open (apply). OllamaApplyGate passes
+        default=True so a confused model never blocks an otherwise-valid listing."""
         mock_post.return_value = self._mock_resp("")
-        self.assertFalse(self._gate().should_apply(EXPOSE))
+        self.assertTrue(self._gate().should_apply(EXPOSE))
 
     @patch("berlin_flat_hunter.ollama_client.requests.post")
     def test_uses_gate_model_over_ollama_model(self, mock_post):

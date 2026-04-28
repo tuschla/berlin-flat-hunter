@@ -5,10 +5,34 @@ on 2026-04-26. See README.md for current status. Use ``dry_run: true`` in config
 to fill forms without submitting (recommended on first use).
 """
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from flathunter.abstract_processor import Processor
 from flathunter.logging import logger
+
+# After this many consecutive URL-matched apply() failures for the same site,
+# we assume selectors are stale and push a notifier alert. Cool-down avoids
+# spamming when every listing in a hunt cycle hits the same broken site.
+_STALE_THRESHOLD = 3
+_STALE_ALERT_COOLDOWN = 3600  # seconds
+
+
+class ManualApplyRequired(Exception):
+    """Raised by an applicator when an external block prevents automated
+    submission for a listing — e.g. Gewobag reCAPTCHA, Kleinanzeigen login
+    wall with no credentials configured. The ``AutoApplicator`` catches this
+    and dispatches a per-listing notification through the alert chain so the
+    user knows to apply manually, instead of letting the listing silently
+    fall through.
+
+    This is distinct from a "stale selectors" failure: stale selectors mean
+    the applicator code is broken; ``ManualApplyRequired`` means the code
+    works but the *site* deliberately requires a human.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _chrome_driver(headless: bool = True):
@@ -56,13 +80,74 @@ _COMMON_SELECTORS = {
 class GewobagApplicator:
     """Submit Anfrage form on a Gewobag listing detail page.
 
-    The contact form is JS-rendered behind an "Anfrage senden" button; we click
-    it first, then fill the (hopefully) revealed form. Layout has historically
-    been brittle — set ``auto_apply.dry_run: true`` to verify before going live.
+    Layout (verified live 2026-04-28 by rendering the iframe in headless
+    Chromium and dumping the Angular DOM): the page exposes a button
+    ``button.rental-contact[data-tab='rental-contact']`` ("Anfrage senden")
+    which reveals a tab containing ``iframe#contact-iframe`` pointing at
+    ``app.wohnungshelden.de``. The application form is an Angular Reactive-
+    Forms / NG-ZORRO SPA inside that iframe with these named controls:
+
+    - ``firstName``, ``lastName``, ``email``, ``phoneNumber``
+    - ``street``, ``houseNumber``, ``zipCode``, ``city``
+    - ``applicantMessage`` (textarea)
+    - a Gewobag-specific privacy checkbox with ``id`` matching
+      ``*datenschutz*`` (the rest of the id is dynamically generated per page)
+    - submit button identified by ``[data-cy='btn-submit']``
+
+    The form ALSO includes (which we cannot fully automate):
+    - A salutation combobox (``role='combobox'``, NG-ZORRO ``nz-select``)
+    - "Für wen wird die Wohnungsanfrage gestellt" combobox + nested first/last
+      name/phone if filled on someone else's behalf
+    - "Gesamtzahl der einziehenden Personen" required number input
+    - **Google reCAPTCHA** — invisible challenge that must be solved before
+      submit will be accepted by the wohnungshelden backend.
+
+    Practically this means **dry-run mode reliably reports field coverage**,
+    but live submission fails at the reCAPTCHA step regardless of how many
+    fields we fill. We detect reCAPTCHA presence and abort live submit with a
+    clear error (logged + surfaced via the AutoApplicator alert chain).
     """
 
     URL_MATCH = "gewobag.de"
     SITE_NAME = "Gewobag"
+
+    _IFRAME = "iframe#contact-iframe"
+
+    # Selectors verified against rendered NG-ZORRO DOM (2026-04-28). Each
+    # cascade prefers the canonical formcontrolname binding then falls back
+    # to id/name patterns for forward-compatibility with minor renames.
+    _SEL_FIRSTNAME = (
+        "input[formcontrolname='firstName'], input#firstName, "
+        "input[data-cy='firstName']"
+    )
+    _SEL_LASTNAME = (
+        "input[formcontrolname='lastName'], input#lastName, "
+        "input[data-cy='lastName']"
+    )
+    _SEL_EMAIL = (
+        "input[formcontrolname='email'], input#email, "
+        "input[data-cy='email']"
+    )
+    _SEL_PHONE = (
+        "input[formcontrolname='phoneNumber'], input#phone-number, "
+        "input[data-cy='phone-number']"
+    )
+    _SEL_MESSAGE = (
+        "textarea[formcontrolname='applicantMessage'], textarea#applicant-message, "
+        "textarea[data-cy='applicant-message']"
+    )
+    _SEL_STREET = "input[formcontrolname='street'], input#street, input[data-cy='street']"
+    _SEL_HOUSENUMBER = (
+        "input[formcontrolname='houseNumber'], input#house-number, "
+        "input[data-cy='house-number']"
+    )
+    _SEL_ZIP = "input[formcontrolname='zipCode'], input#zip-code, input[data-cy='zip-code']"
+    _SEL_CITY = "input[formcontrolname='city'], input#city, input[data-cy='city']"
+    _SEL_PRIVACY = "input[type='checkbox'][id*='datenschutz']"
+    _SEL_SUBMIT = "button[data-cy='btn-submit'], button.ant-btn-primary[type='submit']"
+    # reCAPTCHA presence indicator — wohnungshelden injects this textarea even
+    # when the badge is invisible, so it's a reliable detection signal.
+    _SEL_RECAPTCHA = "textarea.g-recaptcha-response, iframe[src*='recaptcha']"
 
     def __init__(self, applicant: dict, dry_run: bool = False):
         self.applicant = applicant
@@ -83,45 +168,104 @@ class GewobagApplicator:
 
             driver = _chrome_driver()
             try:
+                # 1. Load the listing page only long enough to read the iframe
+                #    src — the wohnungshelden form lives inside a hidden tab,
+                #    and forcing the tab open via JS click is fragile in
+                #    headless Chrome (inputs end up displayed=False because the
+                #    parent ``.content-tab`` div has ``display:none``). It is
+                #    simpler and more reliable to navigate the driver directly
+                #    to the iframe's URL — wohnungshelden serves the SPA at
+                #    that URL standalone, with all inputs as top-level visible
+                #    elements. The src is per-listing (contains a token), so
+                #    we cannot hard-code it.
                 driver.get(url)
-                wait = WebDriverWait(driver, 10)
-                # Click "Anfrage senden" tab/button to reveal the contact form
                 try:
-                    wait.until(EC.element_to_be_clickable((
-                        By.CSS_SELECTOR,
-                        "button.rental-contact, button[data-tab='rental-contact'], "
-                        "a[href*='anfrage'], a.rental-contact",
-                    ))).click()
-                    # Wait for any input the form should expose, instead of a fixed sleep —
-                    # form rendering may take longer than 1s on slow connections.
-                    try:
-                        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((
-                            By.CSS_SELECTOR, "input[type='email'], textarea",
-                        )))
-                    except Exception:
-                        pass
+                    iframe_el = WebDriverWait(driver, 15).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, self._IFRAME))
+                    )
                 except Exception:
-                    logger.warning("Gewobag: 'Anfrage senden' button not found on %s", url)
-                # Fill whatever inputs the now-rendered form exposes
+                    logger.warning("Gewobag: contact iframe not found on %s — "
+                                   "page layout changed", url)
+                    return False
+                iframe_src = iframe_el.get_attribute("src") or ""
+                if not iframe_src.startswith("https://"):
+                    logger.warning("Gewobag: iframe src missing or invalid on %s "
+                                   "(got %r)", url, iframe_src)
+                    return False
+
+                # 2. Navigate to the standalone SPA URL — now inputs are
+                #    top-level and visible, no tab juggling required.
+                driver.get(iframe_src)
+
+                # 3. Wait for the Angular SPA to mount its form. We wait for
+                #    visibility (not just presence) since we'll be calling
+                #    el.clear() / send_keys, which only work on interactable
+                #    elements.
+                try:
+                    WebDriverWait(driver, 30).until(EC.visibility_of_element_located((
+                        By.CSS_SELECTOR, "input[formcontrolname], textarea[formcontrolname]",
+                    )))
+                except Exception:
+                    logger.warning("Gewobag: wohnungshelden SPA did not render any "
+                                   "form inputs for %s — site may be down", url)
+                    return False
+
+                # 4. Fill all known fields. wohnungshelden splits name into first +
+                #    last; use the WBM-style splitter (last-name-dominant in DACH).
+                last, first = WbmApplicator._split_name(self.applicant.get("name", ""))
                 filled = sum([
-                    _fill_field(driver, _COMMON_SELECTORS["name"], self.applicant.get("name", "")),
-                    _fill_field(driver, _COMMON_SELECTORS["email"], self.applicant.get("email", "")),
-                    _fill_field(driver, _COMMON_SELECTORS["phone"], self.applicant.get("phone", "")),
-                    _fill_field(driver, _COMMON_SELECTORS["message"], self.applicant.get("message", "")),
+                    _fill_field(driver, self._SEL_FIRSTNAME, first),
+                    _fill_field(driver, self._SEL_LASTNAME, last or self.applicant.get("name", "")),
+                    _fill_field(driver, self._SEL_EMAIL, self.applicant.get("email", "")),
+                    _fill_field(driver, self._SEL_PHONE, self.applicant.get("phone", "")),
+                    _fill_field(driver, self._SEL_MESSAGE, self.applicant.get("message", "")),
+                    _fill_field(driver, self._SEL_STREET, self.applicant.get("street", "")),
+                    _fill_field(driver, self._SEL_HOUSENUMBER, self.applicant.get("house_number", "")),
+                    _fill_field(driver, self._SEL_ZIP, self.applicant.get("postal_code", "")),
+                    _fill_field(driver, self._SEL_CITY, self.applicant.get("city", "")),
                 ])
                 if filled == 0:
-                    logger.warning("Gewobag: no form fields matched on %s — selectors may be stale", url)
+                    logger.warning("Gewobag: no form fields matched inside iframe on %s — "
+                                   "wohnungshelden form schema likely changed", url)
                     return False
+
+                # 5. Privacy checkbox — Gewobag-specific dynamic id (formly_NN_checkbox_…).
+                #    Required for the SPA's submit validation. NG-ZORRO often hides the
+                #    real input behind a styled wrapper, so we click via JS as fallback.
+                try:
+                    box = driver.find_element(By.CSS_SELECTOR, self._SEL_PRIVACY)
+                    if not box.is_selected():
+                        try:
+                            box.click()
+                        except Exception:
+                            driver.execute_script("arguments[0].click();", box)
+                except Exception:
+                    logger.debug("Gewobag: no privacy checkbox visible — assuming not required")
+
                 if self.dry_run:
                     logger.info("Gewobag dry-run: %d fields filled but submit skipped for %s",
                                 filled, url)
                     return True
-                driver.find_element(By.CSS_SELECTOR, _COMMON_SELECTORS["submit"]).click()
+
+                # 6. reCAPTCHA gate — wohnungshelden runs Google reCAPTCHA on
+                #    submit. Selenium cannot solve it. Raise ManualApplyRequired
+                #    so the AutoApplicator dispatches a per-listing notification
+                #    (telegram/etc.) prompting the user to submit manually,
+                #    instead of treating this as a regular failure.
+                if driver.find_elements(By.CSS_SELECTOR, self._SEL_RECAPTCHA):
+                    raise ManualApplyRequired("reCAPTCHA challenge")
+                try:
+                    driver.find_element(By.CSS_SELECTOR, self._SEL_SUBMIT).click()
+                except Exception as exc:
+                    logger.warning("Gewobag: submit button not clickable on %s: %s", url, exc)
+                    return False
                 time.sleep(2)
                 logger.info("Gewobag application submitted for %s", url)
                 return True
             finally:
                 driver.quit()
+        except ManualApplyRequired:
+            raise  # AutoApplicator turns this into a manual-apply notification
         except Exception as exc:
             logger.warning("Gewobag application failed for %s: %s", url, exc)
             return False
@@ -226,6 +370,7 @@ class KleinanzeigenApplicator:
     """
 
     URL_MATCH = "kleinanzeigen.de"
+    SITE_NAME = "Kleinanzeigen"
     LOGIN_URL = "https://www.kleinanzeigen.de/m-einloggen.html"
 
     def __init__(self, applicant: dict, dry_run: bool = False):
@@ -242,13 +387,17 @@ class KleinanzeigenApplicator:
         email = self.applicant.get("kleinanzeigen_email") or self.applicant.get("email", "")
         password = self.applicant.get("kleinanzeigen_password", "")
         if not email or not password:
-            logger.warning("KleinanzeigenApplicator: email and kleinanzeigen_password required")
-            return False
+            # User can't apply automatically without creds; treat as manual-apply
+            # so the listing surfaces in the alert chain instead of silently dropping.
+            raise ManualApplyRequired("Kleinanzeigen credentials not configured")
         try:
             driver = self._ensure_driver()
             if not self._logged_in and not self._login(driver, email, password):
-                return False
+                # Likely wrong password / account locked / 2FA prompt — needs human.
+                raise ManualApplyRequired("Kleinanzeigen login failed")
             return self._send_message(driver, url)
+        except ManualApplyRequired:
+            raise
         except Exception as exc:
             logger.warning("Kleinanzeigen application failed for %s: %s", url, exc)
             self._close_driver()
@@ -356,11 +505,16 @@ class KleinanzeigenApplicator:
 class AutoApplicator(Processor):
     """Auto-submit applications for Gewobag, WBM, and Kleinanzeigen exposes.
 
-    When `auto_apply.ollama_gate` is true, consults Ollama before each submission;
+    When ``auto_apply.ollama_gate`` is true, consults Ollama before each submission;
     defaults to apply when Ollama is unreachable.
+
+    Tracks per-site consecutive apply failures: once a site fails ``_STALE_THRESHOLD``
+    times in a row on URLs that match its ``URL_MATCH`` (i.e. it should have worked),
+    pushes a "selectors stale" alert through the optional ``alert_dispatch`` callback
+    so the failure surfaces beyond a debug log. Counter resets on the next success.
     """
 
-    def __init__(self, config):
+    def __init__(self, config, alert_dispatch: Optional[Callable[[list[str]], None]] = None):
         self.config = config
         applicant = config.applicant_config() if hasattr(config, "applicant_config") else {}
         apply_cfg = getattr(config, "config", {}).get("auto_apply", {})
@@ -375,15 +529,101 @@ class AutoApplicator(Processor):
             from berlin_flat_hunter.ollama_apply_gate import OllamaApplyGate
             self.gate = OllamaApplyGate(config)
 
+        self._alert_dispatch = alert_dispatch
+        self._failure_counts: dict[str, int] = {}
+        self._last_stale_alert_ts: dict[str, float] = {}
+
     def process_expose(self, expose: dict) -> dict:
         if self.gate is not None and not self.gate.should_apply(expose):
             logger.info("Ollama gate: skipping application for %s", expose.get("url"))
             return expose
+        url = expose.get("url", "") or ""
         for applicator in self.applicators:
-            if applicator.apply(expose):
+            url_match = getattr(applicator, "URL_MATCH", "")
+            is_target = bool(url_match) and url_match in url
+            try:
+                ok = bool(applicator.apply(expose))
+            except ManualApplyRequired as exc:
+                # Site demands human (reCAPTCHA, missing creds, etc.) — push
+                # a per-listing alert through the notifier chain so the user
+                # gets a telegram/etc. ping with the listing URL to apply by
+                # hand. Counts as a "soft" failure: don't increment the stale-
+                # selector counter (the code is fine, the *site* requires a
+                # human), and stop trying sibling applicators since URL_MATCH
+                # already identified the right one.
+                self._notify_manual_apply(applicator, expose, exc.reason)
+                expose["manual_apply_required"] = True
+                break
+            except Exception as exc:
+                site = getattr(applicator, "SITE_NAME", type(applicator).__name__)
+                logger.warning("%s apply raised: %s", site, exc)
+                ok = False
+            if ok:
                 expose["applied"] = True
+                if is_target:
+                    self._record_success(applicator)
+                break
+            if is_target:
+                # Only one applicator can own a given URL (URL_MATCH values are
+                # disjoint per host) — once we know which site this URL belongs
+                # to and it failed, don't keep calling sibling applicators that
+                # would all just no-op via their own URL_MATCH guards.
+                self._record_failure(applicator, url)
                 break
         return expose
+
+    def _notify_manual_apply(self, applicator, expose: dict, reason: str):
+        """Format a per-listing manual-apply notice and push it through the
+        alert dispatch (which fans out to every configured notifier when
+        ``monitoring.alert_via_notifiers: true``). Always logs even when no
+        notifier is wired so the event is at least visible in the journal.
+        """
+        site = getattr(applicator, "SITE_NAME", type(applicator).__name__)
+        title = (expose.get("title") or "").strip()
+        url = expose.get("url", "")
+        msg = (
+            f"[MANUAL APPLY] {site}: cannot auto-submit ({reason}). "
+            f"Apply by hand: {title} — {url}"
+        ) if title else (
+            f"[MANUAL APPLY] {site}: cannot auto-submit ({reason}). "
+            f"Apply by hand: {url}"
+        )
+        logger.info(msg)
+        if self._alert_dispatch is None:
+            return
+        try:
+            self._alert_dispatch([msg])
+        except Exception as exc:
+            logger.warning("Manual-apply notify failed: %s", exc)
+
+    def _record_success(self, applicator):
+        site = getattr(applicator, "SITE_NAME", type(applicator).__name__)
+        if self._failure_counts.get(site):
+            logger.info("%s auto-apply recovered after %d failures",
+                        site, self._failure_counts[site])
+        self._failure_counts[site] = 0
+
+    def _record_failure(self, applicator, url: str):
+        site = getattr(applicator, "SITE_NAME", type(applicator).__name__)
+        count = self._failure_counts.get(site, 0) + 1
+        self._failure_counts[site] = count
+        if count < _STALE_THRESHOLD:
+            return
+        now = time.time()
+        if now - self._last_stale_alert_ts.get(site, 0.0) < _STALE_ALERT_COOLDOWN:
+            return
+        self._last_stale_alert_ts[site] = now
+        msg = (
+            f"[APPLICATOR ALERT] {site}: {count} consecutive auto-apply failures "
+            f"(latest URL: {url}) — selectors likely stale, check applicator.py"
+        )
+        logger.error(msg)
+        if self._alert_dispatch is None:
+            return
+        try:
+            self._alert_dispatch([msg])
+        except Exception as exc:
+            logger.warning("AutoApplicator alert dispatch failed: %s", exc)
 
     def close(self):
         """Release any persistent resources (e.g. Kleinanzeigen Chrome driver)."""
