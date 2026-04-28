@@ -37,8 +37,26 @@ class TestOllamaClient(unittest.TestCase):
         self.assertFalse(c.ask_yes_no("?", default=True))
 
     @patch("berlin_flat_hunter.ollama_client.requests.post")
-    def test_empty_response_returns_false(self, mock_post):
+    def test_empty_response_returns_default(self, mock_post):
+        """Empty body is unparseable → default (fail-open per caller intent)."""
         mock_post.return_value = _resp({"response": ""})
+        c = OllamaClient()
+        self.assertTrue(c.ask_yes_no("?", default=True))
+        self.assertFalse(c.ask_yes_no("?", default=False))
+
+    @patch("berlin_flat_hunter.ollama_client.requests.post")
+    def test_unrecognised_reply_returns_default(self, mock_post):
+        """Replies like 'Maybe' or 'It depends' fall back to the default."""
+        mock_post.return_value = _resp({"response": "Maybe — it depends on..."})
+        c = OllamaClient()
+        self.assertTrue(c.ask_yes_no("?", default=True))
+        mock_post.return_value = _resp({"response": "I'd say so"})
+        self.assertFalse(c.ask_yes_no("?", default=False))
+
+    @patch("berlin_flat_hunter.ollama_client.requests.post")
+    def test_no_with_explanation_returns_false(self, mock_post):
+        """`NO, this is...` still parses as NO."""
+        mock_post.return_value = _resp({"response": "No, the price is too high."})
         c = OllamaClient()
         self.assertFalse(c.ask_yes_no("?", default=True))
 

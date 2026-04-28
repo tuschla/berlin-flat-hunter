@@ -111,10 +111,18 @@ class TestOllamaFilter(unittest.TestCase):
             OllamaFilter(cfg)
 
     @patch("berlin_flat_hunter.ollama_client.requests.post")
-    def test_empty_response_drops_expose(self, mock_post):
+    def test_empty_response_keeps_expose_fail_open(self, mock_post):
+        """Empty/unparseable replies must keep the expose — OllamaFilter passes
+        default=True so a flaky model never silently drops valid listings."""
         mock_post.return_value = self._mock_response("")
         results = list(self.fltr.process_exposes([EXPOSE]))
-        self.assertEqual(len(results), 0)
+        self.assertEqual(len(results), 1)
+
+    @patch("berlin_flat_hunter.ollama_client.requests.post")
+    def test_unrecognised_reply_keeps_expose(self, mock_post):
+        mock_post.return_value = self._mock_response("Maybe — depends on...")
+        results = list(self.fltr.process_exposes([EXPOSE]))
+        self.assertEqual(len(results), 1)
 
 
 if __name__ == "__main__":

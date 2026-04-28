@@ -12,6 +12,13 @@ Config shape (top-level)::
       Friedrichshain: [10243, 10245, 10247, 10249]
 
 A matched expose gets ``expose["matched_neighborhood"]`` set to the name.
+
+Some crawlers (Gesobau card view, occasional Kleinanzeigen postings) emit an
+address like ``"Friedrichshain"`` or ``"Pankow"`` without a PLZ. As a fallback,
+when no PLZ is present we scan the address for the configured neighborhood
+*name* itself, matched on word boundaries to avoid hits like ``Mittenwalder``
+matching ``Mitte``. This rescues otherwise-droppable listings without
+weakening PLZ-based matches.
 """
 import re
 from typing import Iterator, Optional
@@ -47,6 +54,14 @@ class PlzFilter(Processor):
                     continue
                 self._plz_to_name[code] = name
 
+        # Word-boundary, case-insensitive name patterns for the no-PLZ fallback.
+        # Sort by length DESC so multi-word names ("Prenzlauer Berg") win over
+        # any sub-name overlap when the regex engine tests alternatives.
+        self._name_patterns: list[tuple[re.Pattern[str], str]] = [
+            (re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE), name)
+            for name in sorted(mapping, key=len, reverse=True)
+        ]
+
     def process_exposes(self, exposes) -> Iterator[dict]:  # type: ignore[override]
         for expose in exposes:
             name = self._match(expose)
@@ -58,11 +73,26 @@ class PlzFilter(Processor):
     def _match(self, expose: dict) -> Optional[str]:
         address = expose.get("address", "")
         plz = self._extract_plz(address)
-        if plz is None:
-            logger.debug("PlzFilter: no PLZ in address %r — dropping %s",
-                        address, expose.get("url"))
+        if plz is not None:
+            name = self._plz_to_name.get(plz)
+            if name is None:
+                logger.debug("PlzFilter: PLZ %s not in any neighborhood — dropping %s",
+                             plz, expose.get("url"))
+            return name
+
+        name = self._match_by_name(address)
+        if name is None:
+            logger.debug("PlzFilter: no PLZ and no neighborhood name in address %r — dropping %s",
+                         address, expose.get("url"))
+        return name
+
+    def _match_by_name(self, address: str) -> Optional[str]:
+        if not address:
             return None
-        return self._plz_to_name.get(plz)
+        for pattern, name in self._name_patterns:
+            if pattern.search(address):
+                return name
+        return None
 
     @staticmethod
     def _extract_plz(address: str) -> Optional[str]:

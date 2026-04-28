@@ -50,18 +50,10 @@ class BerlinHunter(Hunter):
             self._plz_filter = PlzFilter(config)
 
         self._ollama_filter = OllamaFilter(config) if config.ollama_enabled() else None
-        self._auto_applicator = AutoApplicator(config) if config.auto_apply_enabled() else None
 
-        self._stats_processor = None
-        if config.stats_enabled():
-            stats_path = config.stats_db_path() or os.path.join(state_dir, "stats.db")
-            self.stats = StatsLogger(stats_path)
-            self._stats_processor = StatsProcessor(self.stats)
-        else:
-            self.stats = None
-
-        # Build alert notifiers if monitoring.alert_via_notifiers is true.
-        # Reuses the same notifier list from `notifiers:` so users don't reconfigure.
+        # Build alert notifiers up-front so AutoApplicator (which receives
+        # _dispatch_alerts as a callback) has a populated list ready by the
+        # time it fires its first stale-selector alert.
         self._alert_notifiers: list = []
         mon_cfg = config.monitoring_config()
         if mon_cfg.get("alert_via_notifiers", False):
@@ -74,6 +66,19 @@ class BerlinHunter(Hunter):
                     self._alert_notifiers.append(builder(config))
                 except Exception as exc:
                     logger.warning("SchemaMonitor: could not build %s notifier: %s", name, exc)
+
+        self._auto_applicator = (
+            AutoApplicator(config, alert_dispatch=self._dispatch_alerts)
+            if config.auto_apply_enabled() else None
+        )
+
+        self._stats_processor = None
+        if config.stats_enabled():
+            stats_path = config.stats_db_path() or os.path.join(state_dir, "stats.db")
+            self.stats = StatsLogger(stats_path)
+            self._stats_processor = StatsProcessor(self.stats)
+        else:
+            self.stats = None
 
     def hunt_flats(self, max_pages=None):
         raw_exposes = list(self.crawl_for_exposes(max_pages))
