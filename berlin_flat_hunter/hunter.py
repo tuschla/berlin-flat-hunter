@@ -79,11 +79,16 @@ class BerlinHunter(Hunter):
 
         # Build alert notifiers up-front so AutoApplicator (which receives
         # _dispatch_alerts as a callback) has a populated list ready by the
-        # time it fires its first stale-selector alert.
+        # time it fires its first stale-selector or [MANUAL APPLY] alert.
+        # `monitoring.alert_notifiers` overrides which notifiers fire for
+        # alerts only — useful when per-expose notifications are off
+        # (`notifiers: []`) but you still want Telegram pings on broken
+        # crawlers / manual-apply situations.
         self._alert_notifiers: list = []
         mon_cfg = config.monitoring_config()
         if mon_cfg.get("alert_via_notifiers", False):
-            for name in config.notifiers():
+            alert_names = mon_cfg.get("alert_notifiers") or config.notifiers()
+            for name in alert_names:
                 builder = _NOTIFIER_BUILDERS.get(name)
                 if builder is None:
                     logger.warning("SchemaMonitor: unknown notifier %r — skipping", name)

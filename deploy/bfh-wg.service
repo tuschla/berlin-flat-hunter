@@ -1,0 +1,15 @@
+[Unit]
+Description=berlin-flat-hunter — wg profile (≤€1100, 2 rooms)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/berlin-flat-hunter
+ExecStart=/root/.local/bin/uv run python main.py --config profiles/wg.yaml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
