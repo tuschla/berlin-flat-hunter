@@ -188,5 +188,3 @@ Both default to fail-open (keep/apply) when Ollama is unreachable.
 .venv/bin/python -m pyright   # 0 errors
 .venv/bin/python -m pytest    # 132+ tests
 ```
-# berlin-flat-hunter
-# berlin-flat-hunter
