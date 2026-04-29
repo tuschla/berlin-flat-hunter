@@ -10,18 +10,28 @@ CRITICAL_FIELDS = ("title", "url", "address", "price")
 
 
 class CrawlerHealth:
-    __slots__ = ("consecutive_empty", "last_success_ts", "last_alert_ts")
+    __slots__ = (
+        "consecutive_empty",
+        "last_success_ts",
+        "last_alert_ts",
+        "consecutive_alerts",
+    )
 
     def __init__(self):
         self.consecutive_empty: int = 0
         self.last_success_ts: float = 0.0
         self.last_alert_ts: float = 0.0
+        # Number of alerts already emitted in this failure streak. Drives the
+        # exponential cooldown ladder so a permanently-broken site goes
+        # 1h → 2h → 4h → … instead of pinging once an hour forever.
+        self.consecutive_alerts: int = 0
 
     def to_dict(self) -> dict:
         return {
             "consecutive_empty": self.consecutive_empty,
             "last_success_ts": self.last_success_ts,
             "last_alert_ts": self.last_alert_ts,
+            "consecutive_alerts": self.consecutive_alerts,
         }
 
     @classmethod
@@ -30,6 +40,7 @@ class CrawlerHealth:
         h.consecutive_empty = d.get("consecutive_empty", 0)
         h.last_success_ts = d.get("last_success_ts", 0.0)
         h.last_alert_ts = d.get("last_alert_ts", 0.0)
+        h.consecutive_alerts = d.get("consecutive_alerts", 0)
         return h
 
 
@@ -44,13 +55,23 @@ class SchemaMonitor:
     Alert cool-down: 1 hour between repeated alerts for the same crawler.
     """
 
-    _ALERT_COOLDOWN = 3600  # seconds
+    # Exponential alert cooldown: doubles after each consecutive alert,
+    # capped so a permanently-broken site stops paging beyond once-per-day.
+    # Defaults give the ladder 1h → 2h → 4h → 8h → 16h → 24h(cap).
+    _ALERT_COOLDOWN_BASE = 3600    # seconds — first cooldown
+    _ALERT_COOLDOWN_CAP = 86400    # seconds — never wait longer than this
 
     def __init__(self, state_path: str, config: Optional[dict] = None):
         self.state_path = state_path
         cfg = (config or {}).get("monitoring", {})
         self.empty_threshold: int = cfg.get("consecutive_empty_threshold", 3)
         self.field_miss_threshold: float = cfg.get("field_miss_threshold", 0.5)
+        # Both cooldown bounds are configurable so an operator can shrink them
+        # for testing / loosen the cap if the default 24h is too quiet.
+        self._cooldown_base: float = float(cfg.get("alert_cooldown_seconds",
+                                                   self._ALERT_COOLDOWN_BASE))
+        self._cooldown_cap: float = float(cfg.get("alert_cooldown_cap_seconds",
+                                                  self._ALERT_COOLDOWN_CAP))
         self._health: dict[str, CrawlerHealth] = {}
         self._load()
 
@@ -72,6 +93,11 @@ class SchemaMonitor:
         for crawler_name, crawler_exposes in by_crawler.items():
             health = self._get_health(crawler_name)
             msgs = self._evaluate(crawler_name, crawler_exposes, health)
+            if not msgs:
+                # Healthy cycle resets the alert ladder so the *next* failure
+                # starts back at the 1h cooldown rather than picking up where
+                # the last streak left off.
+                health.consecutive_alerts = 0
             alerts.extend(msgs)
 
         self._save()
@@ -128,11 +154,24 @@ class SchemaMonitor:
 
     def _maybe_send_alert(self, name: str, health: CrawlerHealth, msg: str) -> list[str]:
         now = time.time()
-        if now - health.last_alert_ts < self._ALERT_COOLDOWN:
+        cooldown = self._current_cooldown(health)
+        if now - health.last_alert_ts < cooldown:
             return []  # still in cool-down
         health.last_alert_ts = now
+        health.consecutive_alerts += 1
         logger.error(msg)
         return [msg]
+
+    def _current_cooldown(self, health: CrawlerHealth) -> float:
+        """Cooldown ladder: ``base * 2 ** consecutive_alerts``, capped.
+
+        ``consecutive_alerts`` is the count of alerts already emitted in the
+        current failure streak (0 before the first alert, 1 after, etc.).
+        That makes the *next* alert wait ``base * 2 ** N`` seconds — so the
+        ladder is naturally 1h, 2h, 4h, 8h, 16h, 24h(cap), …
+        """
+        return min(self._cooldown_base * (2 ** health.consecutive_alerts),
+                   self._cooldown_cap)
 
     def _load(self):
         if not os.path.exists(self.state_path):

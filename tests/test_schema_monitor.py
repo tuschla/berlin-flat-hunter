@@ -160,6 +160,87 @@ class TestSchemaMonitor(unittest.TestCase):
         if os.path.exists(path):
             os.unlink(path)
 
+    def test_cooldown_doubles_after_each_alert(self):
+        """1h → 2h → 4h: each consecutive alert doubles the next cooldown."""
+        mon, path = self._new_monitor({
+            "monitoring": {
+                "consecutive_empty_threshold": 1,
+                # 1s base, 100s cap → ladder 1, 2, 4, 8, 16, 32, 64, 100(cap), 100…
+                "alert_cooldown_seconds": 1,
+                "alert_cooldown_cap_seconds": 100,
+            }
+        })
+        # Alert #1 fires (no prior alert; cooldown=1s but last_alert_ts=0)
+        alerts1 = mon.record_empty_crawl("Gewobag")
+        self.assertEqual(len(alerts1), 1)
+        # Manually rewind the clock 1.5s — cooldown is now 2s (2^1) so still suppressed
+        h = mon._health["Gewobag"]
+        h.last_alert_ts = time.time() - 1.5
+        alerts2 = mon.record_empty_crawl("Gewobag")
+        self.assertEqual(len(alerts2), 0)
+        # Rewind 2.5s — cooldown is 2s, fires again
+        h.last_alert_ts = time.time() - 2.5
+        alerts3 = mon.record_empty_crawl("Gewobag")
+        self.assertEqual(len(alerts3), 1)
+        # After two alerts cooldown is 4s
+        h.last_alert_ts = time.time() - 3.5
+        alerts4 = mon.record_empty_crawl("Gewobag")
+        self.assertEqual(len(alerts4), 0)
+        h.last_alert_ts = time.time() - 4.5
+        alerts5 = mon.record_empty_crawl("Gewobag")
+        self.assertEqual(len(alerts5), 1)
+        self.assertEqual(h.consecutive_alerts, 3)
+
+    def test_cooldown_cap_respected(self):
+        mon, _ = self._new_monitor({
+            "monitoring": {
+                "consecutive_empty_threshold": 1,
+                "alert_cooldown_seconds": 10,
+                "alert_cooldown_cap_seconds": 50,
+            }
+        })
+        h = mon._get_health("Gewobag")
+        h.consecutive_alerts = 100  # huge — would otherwise be 10 * 2^100
+        self.assertEqual(mon._current_cooldown(h), 50)
+
+    def test_healthy_crawl_resets_alert_streak(self):
+        """A successful crawl with results must reset consecutive_alerts so
+        the *next* failure starts back at the base 1h cooldown."""
+        mon, _ = self._new_monitor({
+            "monitoring": {
+                "consecutive_empty_threshold": 1,
+                "alert_cooldown_seconds": 1,
+                "alert_cooldown_cap_seconds": 100,
+            }
+        })
+        mon.record_empty_crawl("Gewobag")
+        h = mon._health["Gewobag"]
+        self.assertEqual(h.consecutive_alerts, 1)
+        # Healthy cycle resets — same as data flowing again
+        mon.record_crawl([EXPOSE_OK])
+        self.assertEqual(h.consecutive_alerts, 0)
+
+    def test_consecutive_alerts_persists_across_reload(self):
+        """The exponential cooldown only works if consecutive_alerts survives
+        process restart — otherwise every reboot resets to 1h cooldown."""
+        mon, path = self._new_monitor({
+            "monitoring": {
+                "consecutive_empty_threshold": 1,
+                "alert_cooldown_seconds": 1,
+                "alert_cooldown_cap_seconds": 100,
+            }
+        })
+        mon.record_empty_crawl("Gewobag")
+        # New monitor reads the same state file
+        mon2 = SchemaMonitor(path, {
+            "monitoring": {
+                "consecutive_empty_threshold": 1,
+                "alert_cooldown_seconds": 1,
+                "alert_cooldown_cap_seconds": 100,
+            }
+        })
+        self.assertEqual(mon2._health["Gewobag"].consecutive_alerts, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
