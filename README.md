@@ -9,6 +9,24 @@ Berlin-focused flat-hunting tool. Thin extension layer on top of [flathunter](ht
 - **Adds** schema-change alerting (warn when a crawler returns 0 results or empty fields)
 - **Adds** SQLite statistics logging for unique notices
 
+## Disclaimer
+
+This project is provided **for personal and educational use only**, with no
+warranty of any kind. It crawls and submits forms on third-party real-estate
+sites which have their own Terms of Service — many of those ToS prohibit
+automated access, scraping, or form submission. **You are solely responsible**
+for ensuring your use of this software complies with the ToS of every site you
+target, with `robots.txt`, with applicable rate limits, and with any local laws
+governing automated processing of personal data (e.g. GDPR Art. 22 around
+profiling, the German UWG around automated form submissions). The author(s)
+accept no liability for accounts being banned, IPs being blocked, applications
+being rejected, or any other consequence of running this tool. **Default to
+`auto_apply.dry_run: true` and review each form by hand before going live.**
+
+Site selectors and form structures change frequently; submissions may silently
+fail or land in spam queues. Treat auto-apply as a best-effort convenience
+layer, not a guarantee.
+
 ## Install
 
 ```bash
@@ -195,3 +213,9 @@ Both default to fail-open (keep/apply) when Ollama is unreachable.
 .venv/bin/python -m pyright   # 0 errors
 .venv/bin/python -m pytest    # 132+ tests
 ```
+
+## License
+
+GNU Affero General Public License v3.0 — same as upstream
+[flathunter](https://github.com/flathunters/flathunter), which this project
+links against. See [LICENSE](LICENSE) for the full text.
