@@ -6,10 +6,17 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/berlin-flat-hunter
+# Unbuffered stdout — see bfh-single.service for the rationale.
+Environment=PYTHONUNBUFFERED=1
+# Wait 60 s after boot so bfh-single finishes its undetected-chromedriver
+# patch + Chrome warm-up before this service spawns its own Chrome. Two
+# parallel cold-starts race the chromedriver cache and crash one of them.
+ExecStartPre=/bin/sleep 60
 ExecStart=/root/.local/bin/uv run python main.py --config profiles/wg.yaml
 Restart=on-failure
 RestartSec=30
 TimeoutStopSec=60
+TimeoutStartSec=180
 
 [Install]
 WantedBy=multi-user.target

@@ -6,6 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/root/berlin-flat-hunter
+# Unbuffered stdout so journalctl shows progress in real time (default
+# CPython stdout is block-buffered when not a tty, which makes a 5-min
+# crawl loop look hung in `journalctl -f`).
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/root/.local/bin/uv run python main.py --config profiles/single.yaml
 Restart=on-failure
 RestartSec=30
