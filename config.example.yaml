@@ -108,6 +108,13 @@ monitoring:
   # (whichever names are listed under `notifiers:` — apprise, telegram, slack,
   # mattermost). Default: alerts go to the log only.
   alert_via_notifiers: false
+  # Exponential alert cooldown ladder. Each consecutive alert for the same
+  # crawler doubles the wait before the next one fires, capped at
+  # alert_cooldown_cap_seconds. Resets on the next healthy crawl. Defaults
+  # give 1h → 2h → 4h → 8h → 16h → 24h(cap) — far less noisy than a fixed
+  # 1h cooldown for crawlers that stay broken for days.
+  alert_cooldown_seconds: 3600       # base / first cooldown (1h)
+  alert_cooldown_cap_seconds: 86400  # max cooldown (24h)
 
 # Statistics logging — log each unique apartment notice to a SQLite DB for trend analysis.
 # DB tracks first-seen timestamp per listing; query via StatsLogger API.
