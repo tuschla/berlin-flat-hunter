@@ -35,3 +35,25 @@ services:
     volumes:
       - ./profiles/family.yaml:/config/config.yaml:ro
       - ./data/family:/data
+
+  # Hands-off auto-apply profile. Builds the runtime-vnc Dockerfile target
+  # so Chrome runs *headed* inside Xvfb, the profile dir persists across
+  # restarts (cookies/login state survives), and noVNC is reachable on
+  # http://localhost:6080/vnc.html for first-time login + occasional
+  # CAPTCHA solving. The /data/chrome-profile path is set via
+  # BFH_CHROME_PROFILE in the runtime-vnc image; AutoApplicator picks it
+  # up automatically.
+  vnc:
+    build:
+      context: .
+      target: runtime-vnc
+    image: berlin-flat-hunter:vnc
+    container_name: bfh-vnc
+    restart: unless-stopped
+    volumes:
+      - ./profiles/vnc.yaml:/config/config.yaml:ro
+      - ./data/vnc:/data
+    ports:
+      - "127.0.0.1:6080:6080"   # noVNC — bound to localhost, not the LAN
+    # shm-size avoids Chrome's "Out of memory" crash on /dev/shm exhaustion
+    shm_size: "2gb"
