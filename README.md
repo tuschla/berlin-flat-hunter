@@ -65,6 +65,43 @@ docker run -d --name bfh \
 The image bundles Chromium + chromedriver so Kleinanzeigen crawling and all
 Selenium-based auto-apply work out of the box.
 
+### Hands-off auto-apply via persistent profile + noVNC
+
+Sites with reCAPTCHA / bot detection (Gewobag → wohnungshelden, Kleinanzeigen)
+treat warm Chrome profiles much more leniently than fresh headless instances.
+The `runtime-vnc` Dockerfile target runs Chrome **headed** inside Xvfb, exposes
+a noVNC web client on port 6080 for first-time login + occasional CAPTCHA
+solving, and persists the Chrome profile dir on a volume so cookies/login
+state survive container restarts.
+
+```bash
+# Build the VNC-flavored image
+docker build --target runtime-vnc -t berlin-flat-hunter:vnc .
+
+# Or via compose (the `vnc` service in docker-compose.yml is preconfigured)
+docker compose up -d vnc
+```
+
+**First-time login workflow:**
+
+1. Open `http://localhost:6080/vnc.html` in any browser → you'll see a Chrome
+   window inside the container.
+2. Visit each site you'll auto-apply on (Gewobag listing, Kleinanzeigen, …),
+   log in, solve any CAPTCHA prompts. Browse a few real pages so the session
+   looks human-warmed.
+3. Cookies + LocalStorage land in `./data/vnc/chrome-profile/`.
+4. The hunter loop is already running in the same container; subsequent
+   `apply()` calls reuse your warm profile. Most sites stop challenging you.
+
+**When a CAPTCHA still appears:** the existing `[MANUAL APPLY]` notifier ping
+fires (telegram et al). Tap it → open the noVNC tab → solve in 5 seconds → the
+next cycle picks up.
+
+**Limits:** sessions expire after weeks; you'll occasionally re-login. The
+container needs `shm_size: 2gb` to stop Chrome OOMing on `/dev/shm`. Keep
+port 6080 bound to localhost (the compose file does this) — don't expose it
+to the LAN unless you set a noVNC password.
+
 ### Multi-profile via docker-compose
 
 `docker-compose.yml` ships with two example services (`cheap`, `family`).

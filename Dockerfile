@@ -46,3 +46,50 @@ VOLUME ["/data", "/config"]
 
 ENTRYPOINT ["python", "main.py"]
 CMD ["--config", "/config/config.yaml"]
+
+
+# --------------------------------------------------------------------------
+# runtime-vnc — same app, but Chrome runs *headed* inside Xvfb and is
+# accessible via a noVNC web client on port 6080. Persistent Chrome profile
+# is volume-mounted so cookies/login state survive container restarts —
+# the workaround for sites whose reCAPTCHA fingerprints anything that
+# looks like fresh / headless / non-warmed automation.
+#
+# Build:   docker build --target runtime-vnc -t bfh:vnc .
+# Run:     docker run -p 6080:6080 -v ./chrome-profile:/data/chrome-profile bfh:vnc
+# Connect: open http://localhost:6080/vnc.html in any browser
+# --------------------------------------------------------------------------
+FROM runtime AS runtime-vnc
+
+USER root
+
+# xvfb         → virtual X server (no physical display)
+# fluxbox      → minimal window manager (some sites probe for one)
+# x11vnc       → bridges Xvfb to VNC protocol on :5900
+# novnc        → web-based VNC client served at /usr/share/novnc/
+# websockify   → translates noVNC's WebSocket frames ↔ raw VNC bytes
+# supervisor   → keeps Xvfb / fluxbox / x11vnc / websockify / app alive
+# dbus + libgtk → Chrome refuses to start without these in headed mode
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        xvfb x11vnc fluxbox \
+        novnc websockify \
+        supervisor \
+        dbus dbus-x11 libgtk-3-0 libnss3 libxss1 libasound2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/log/supervisor
+
+COPY docker/supervisord.conf /etc/supervisor/conf.d/bfh.conf
+
+# Profile dir lives under /data so it shares the per-profile volume that
+# already holds db.sqlite + stats.db + schema_monitor.json.
+ENV BFH_CHROME_PROFILE=/data/chrome-profile \
+    DISPLAY=:99
+
+# noVNC web client. Raw VNC (5900) is intentionally NOT exposed by default —
+# noVNC speaks WebSocket, not raw RFB, and exposing 5900 invites scans.
+EXPOSE 6080
+
+USER hunter
+
+ENTRYPOINT ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/bfh.conf", "-n"]
+CMD []

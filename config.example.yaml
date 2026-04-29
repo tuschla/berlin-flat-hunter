@@ -61,6 +61,14 @@ auto_apply:
   # Strongly recommended on first use — sites change form structure regularly.
   dry_run: true
 
+  # Persistent Chrome profile dir. When set, Chrome runs *headed* via
+  # undetected-chromedriver and reuses the profile across applies. Cookies,
+  # localStorage, and login state survive between runs, which dramatically
+  # reduces reCAPTCHA prompts on sites that fingerprint session warmth.
+  # Use the runtime-vnc Docker target (or set $DISPLAY to an Xvfb instance)
+  # so Chrome has a virtual display to render into.
+  # chrome_profile_dir: /data/chrome-profile
+
   # Ask Ollama before submitting each application (independent of the listing filter above)
   ollama_gate: false
 

@@ -4,6 +4,7 @@ Caveat: form structures change frequently. Selectors verified against live sites
 on 2026-04-26. See README.md for current status. Use ``dry_run: true`` in config
 to fill forms without submitting (recommended on first use).
 """
+import os
 import time
 from typing import Any, Callable, Optional
 
@@ -35,7 +36,38 @@ class ManualApplyRequired(Exception):
         self.reason = reason
 
 
-def _chrome_driver(headless: bool = True):
+def _chrome_driver(headless: bool = True, profile_dir: Optional[str] = None):
+    """Construct a Chrome WebDriver.
+
+    When ``profile_dir`` is set, the driver loads (or creates) a persistent
+    Chrome profile at that path and runs *headed* via undetected-chromedriver.
+    Persisting the profile keeps cookies/local-storage/login state across
+    runs, which dramatically reduces reCAPTCHA prompts for sites that score
+    trust on session warmth. The Docker ``vnc`` target supplies the required
+    virtual display (Xvfb on ``:99``) and a noVNC web client on port 6080
+    for occasional manual login / CAPTCHA solving.
+
+    When ``profile_dir`` is unset the driver falls back to plain headless
+    Chrome — appropriate for dry-run testing or sites without bot protection.
+    """
+    if profile_dir:
+        try:
+            import undetected_chromedriver as uc
+        except ImportError as exc:
+            raise ImportError(
+                "undetected-chromedriver is required when chrome_profile_dir "
+                "is set; install via `uv sync`"
+            ) from exc
+        os.makedirs(profile_dir, exist_ok=True)
+        options = uc.ChromeOptions()
+        options.add_argument(f"--user-data-dir={profile_dir}")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        # Do NOT set --headless: undetected-chromedriver disables it anyway,
+        # and the whole point of this path is real-headed Chrome rendered
+        # into Xvfb so reCAPTCHA cannot trivially fingerprint automation.
+        return uc.Chrome(options=options, use_subprocess=True)
+
     from selenium import webdriver
     options = webdriver.ChromeOptions()
     if headless:
@@ -149,9 +181,10 @@ class GewobagApplicator:
     # when the badge is invisible, so it's a reliable detection signal.
     _SEL_RECAPTCHA = "textarea.g-recaptcha-response, iframe[src*='recaptcha']"
 
-    def __init__(self, applicant: dict, dry_run: bool = False):
+    def __init__(self, applicant: dict, dry_run: bool = False, profile_dir: Optional[str] = None):
         self.applicant = applicant
         self.dry_run = dry_run
+        self.profile_dir = profile_dir or None
 
     def close(self):
         """No persistent state — driver is per-apply. Defined for symmetry with the pool API."""
@@ -166,7 +199,7 @@ class GewobagApplicator:
             from selenium.webdriver.support import expected_conditions as EC
             from selenium.webdriver.support.ui import WebDriverWait
 
-            driver = _chrome_driver()
+            driver = _chrome_driver(profile_dir=self.profile_dir)
             try:
                 # 1. Load the listing page only long enough to read the iframe
                 #    src — the wohnungshelden form lives inside a hidden tab,
@@ -294,9 +327,10 @@ class WbmApplicator:
     _PRIVACY_CHECKBOX = "input#powermail_field_datenschutzhinweis_1"
     _SUBMIT = "form.powermail_form button[type='submit']"
 
-    def __init__(self, applicant: dict, dry_run: bool = False):
+    def __init__(self, applicant: dict, dry_run: bool = False, profile_dir: Optional[str] = None):
         self.applicant = applicant
         self.dry_run = dry_run
+        self.profile_dir = profile_dir or None
 
     def close(self):
         """No persistent state — driver is per-apply."""
@@ -311,7 +345,7 @@ class WbmApplicator:
             from selenium.webdriver.support import expected_conditions as EC
             from selenium.webdriver.support.ui import WebDriverWait
 
-            driver = _chrome_driver()
+            driver = _chrome_driver(profile_dir=self.profile_dir)
             try:
                 driver.get(url)
                 WebDriverWait(driver, 10).until(
@@ -373,9 +407,10 @@ class KleinanzeigenApplicator:
     SITE_NAME = "Kleinanzeigen"
     LOGIN_URL = "https://www.kleinanzeigen.de/m-einloggen.html"
 
-    def __init__(self, applicant: dict, dry_run: bool = False):
+    def __init__(self, applicant: dict, dry_run: bool = False, profile_dir: Optional[str] = None):
         self.applicant = applicant
         self.dry_run = dry_run
+        self.profile_dir = profile_dir or None
         self._driver: Optional[Any] = None  # selenium WebDriver, typed loosely to avoid hard dep
         self._logged_in = False
 
@@ -392,9 +427,18 @@ class KleinanzeigenApplicator:
             raise ManualApplyRequired("Kleinanzeigen credentials not configured")
         try:
             driver = self._ensure_driver()
-            if not self._logged_in and not self._login(driver, email, password):
-                # Likely wrong password / account locked / 2FA prompt — needs human.
-                raise ManualApplyRequired("Kleinanzeigen login failed")
+            if not self._logged_in:
+                # Persistent profile may carry a still-valid session cookie —
+                # check first to avoid an unnecessary login round-trip that
+                # disturbs Kleinanzeigen's risk score (login forms attract
+                # bot-detection scrutiny).
+                if self._is_logged_in(driver):
+                    self._logged_in = True
+                    logger.info("Kleinanzeigen: existing session detected via "
+                                "persistent profile — skipping login flow")
+                elif not self._login(driver, email, password):
+                    # Likely wrong password / account locked / 2FA prompt — needs human.
+                    raise ManualApplyRequired("Kleinanzeigen login failed")
             return self._send_message(driver, url)
         except ManualApplyRequired:
             raise
@@ -405,8 +449,26 @@ class KleinanzeigenApplicator:
 
     def _ensure_driver(self):
         if self._driver is None:
-            self._driver = _chrome_driver()
+            # Reuses persistent Chrome profile across applies. With a warm
+            # session Kleinanzeigen will frequently skip its login wall
+            # entirely (cookies still valid) — the auto-login dance becomes a
+            # no-op rather than a fragile selector chain.
+            self._driver = _chrome_driver(profile_dir=self.profile_dir)
         return self._driver
+
+    def _is_logged_in(self, driver) -> bool:
+        """Heuristic: a warm profile may already carry a Kleinanzeigen session
+        cookie, in which case visiting the home page redirects us straight in
+        and the login form is absent. We probe for the user-menu element that
+        only renders for authenticated sessions."""
+        from selenium.webdriver.common.by import By
+        try:
+            driver.get("https://www.kleinanzeigen.de/")
+            els = driver.find_elements(By.CSS_SELECTOR,
+                                       "[data-testid='user-menu'], #user-email, .user-account")
+            return any(el.is_displayed() for el in els)
+        except Exception:
+            return False
 
     def _close_driver(self):
         if self._driver:
@@ -519,10 +581,15 @@ class AutoApplicator(Processor):
         applicant = config.applicant_config() if hasattr(config, "applicant_config") else {}
         apply_cfg = getattr(config, "config", {}).get("auto_apply", {})
         dry_run = bool(apply_cfg.get("dry_run", False))
+        # Profile-dir resolution: explicit config wins, env var second
+        # (docker compose convention), empty string disables the feature.
+        profile_dir = (apply_cfg.get("chrome_profile_dir", "")
+                       or os.environ.get("BFH_CHROME_PROFILE", "")
+                       or "").strip() or None
         self.applicators = [
-            GewobagApplicator(applicant, dry_run=dry_run),
-            WbmApplicator(applicant, dry_run=dry_run),
-            KleinanzeigenApplicator(applicant, dry_run=dry_run),
+            GewobagApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
+            WbmApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
+            KleinanzeigenApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
         ]
         self.gate = None
         if apply_cfg.get("ollama_gate", False):
