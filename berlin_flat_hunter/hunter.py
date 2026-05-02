@@ -204,14 +204,32 @@ class BerlinHunter(Hunter):
         last = self._driver_last_recycled.get(name, 0.0)
         if not force and (now - last) < _DRIVER_RECYCLE_MIN_INTERVAL:
             return
-        try:
-            if searcher.driver is not None:
-                searcher.driver.quit()
-        except Exception as exc:  # noqa: BLE001 — quit() on dead driver often raises
-            logger.debug("%s: driver.quit() raised %s (ignored)",
-                         name, type(exc).__name__)
+        driver = searcher.driver
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception as exc:  # noqa: BLE001 — quit() on dead driver often raises
+                logger.debug("%s: driver.quit() raised %s (ignored)",
+                             name, type(exc).__name__)
+            # quit() sends a QUIT command over HTTP to chromedriver; when the
+            # transport is wedged it raises before Service.stop() runs, leaving
+            # the chromedriver subprocess as a zombie. Reap it explicitly.
+            self._reap_chromedriver_subprocess(driver, name)
         searcher.driver = None
         self._driver_last_recycled[name] = now
+
+    @staticmethod
+    def _reap_chromedriver_subprocess(driver, name: str) -> None:
+        proc = getattr(getattr(driver, "service", None), "process", None)
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait(timeout=5)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("%s: chromedriver reap raised %s (ignored)",
+                         name, type(exc).__name__)
 
     # ------------------------------------------------------------------
     # Hunt cycle.
