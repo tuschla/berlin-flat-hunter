@@ -7,6 +7,7 @@ urls:
   - https://www.wbm.de/wohnungen-berlin/angebote/
   - https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/wohnung/
   - https://www.gesobau.de/mieten/wohnungssuche.html
+  - https://www.howoge.de/immobiliensuche/wohnungssuche.html
 
 # Standard flathunter filters
 filters:
@@ -115,6 +116,22 @@ monitoring:
   # 1h cooldown for crawlers that stay broken for days.
   alert_cooldown_seconds: 3600       # base / first cooldown (1h)
   alert_cooldown_cap_seconds: 86400  # max cooldown (24h)
+
+# Kleinanzeigen scam filter — drop listings whose title or address matches a
+# known advance-fee-scam template ("Auslandsumzug", "WhatsApp", "Western Union",
+# email-in-title, …). Only applies to Kleinanzeigen exposes; public-housing
+# crawlers pass through untouched.
+scam_filter:
+  enabled: true
+  # Add custom substrings (case-insensitive) to the built-in denylist.
+  # extra_patterns:
+  #   - "deposit via"
+  #   - "ich bin in london"
+  # Or replace the built-in denylist entirely:
+  # override_patterns:
+  #   - "only-this-pattern"
+  # Disable the email-in-title heuristic (default on).
+  # flag_email_in_title: false
 
 # Statistics logging — log each unique apartment notice to a SQLite DB for trend analysis.
 # DB tracks first-seen timestamp per listing; query via StatsLogger API.

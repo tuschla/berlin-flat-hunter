@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="de">
+<head><meta charset="UTF-8"><title>Howoge Bewerbungsprozess</title></head>
+<body>
+<form id="show-visit-form" class="immo-form form--validate" action="/immobiliensuche/wohnungssuche/besichtigung-vereinbaren/bewerbungsprozess.html?tx_howrealestate_visitform%5Baction%5D=doiSend&amp;tx_howrealestate_visitform%5Bcontroller%5D=Immoobject&amp;cHash=ABCDEF1234567890" method="post">
+  <div>
+    <input type="hidden" name="tx_howrealestate_visitform[__referrer][@extension]" value="HowRealestate">
+    <input type="hidden" name="tx_howrealestate_visitform[__referrer][@controller]" value="Immoobject">
+    <input type="hidden" name="tx_howrealestate_visitform[__referrer][@action]" value="showVisitForm">
+    <input type="hidden" name="tx_howrealestate_visitform[__referrer][arguments]" value="REF_ARGS_BLOB">
+    <input type="hidden" name="tx_howrealestate_visitform[__referrer][@request]" value="REF_REQUEST_BLOB">
+    <input type="hidden" name="tx_howrealestate_visitform[__trustedProperties]" value="TRUSTED_PROPS_BLOB">
+  </div>
+  <fieldset id="hidden-fields">
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][immoobject]" value="7094"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][type]" value="doi"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][linkDoiConfirm]" value="/immobiliensuche/wohnungssuche/besichtigung-vereinbaren/bewerbungsprozess/doi.html"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][linkCurrent]" value="/immobiliensuche/wohnungssuche/besichtigung-vereinbaren/bewerbungsprozess.html"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][language]" value="de"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][spritePath]" value="/_assets/icons.svg"/>
+    <input type="hidden" name="tx_howrealestate_visitform[visitRequest][note]" value="Beispielobjekt"/>
+  </fieldset>
+  <fieldset class="form-fieldset">
+    <input type="text" name="tx_howrealestate_visitform[visitRequest][firstName]" required="required"/>
+    <input type="text" name="tx_howrealestate_visitform[visitRequest][lastName]" required="required"/>
+    <input type="email" name="tx_howrealestate_visitform[visitRequest][email]" required="required"/>
+  </fieldset>
+</form>
+</body>
+</html>

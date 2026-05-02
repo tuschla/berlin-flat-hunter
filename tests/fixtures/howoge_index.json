@@ -1,0 +1,38 @@
+{
+  "immocount": 2,
+  "teasercount": 0,
+  "immoobjects": [
+    {
+      "uid": 7094,
+      "title": "Streitstraße 5, 13587 Berlin",
+      "image": "/fileadmin/promos/downloadedImages/3de75f489497a4d71e748f9225a4b828.jpeg",
+      "district": "Hakenfelde",
+      "rent": 803,
+      "area": 73,
+      "rooms": 3,
+      "wbs": "ja",
+      "features": ["WBS erforderlich", "Aufzug"],
+      "coordinates": {"lat": "52.5575599", "lng": "13.209115"},
+      "icon": "icon-Figures-haus_full",
+      "link": "/immobiliensuche/wohnungssuche/detail/1771-14536-9997.html",
+      "favorite": false,
+      "notice": " 3-Zimmer-Wohnung (WBS 100-140)"
+    },
+    {
+      "uid": 7095,
+      "title": "Beispielallee 12, 10245 Berlin",
+      "image": "/fileadmin/promos/downloadedImages/abc.jpeg",
+      "district": "Friedrichshain",
+      "rent": 1050,
+      "area": 55.5,
+      "rooms": 2,
+      "wbs": "nein",
+      "features": [],
+      "coordinates": {"lat": "52.5", "lng": "13.45"},
+      "icon": "icon-Figures-haus_full",
+      "link": "/immobiliensuche/wohnungssuche/detail/2000-12345-6789.html",
+      "favorite": false,
+      "notice": ""
+    }
+  ]
+}

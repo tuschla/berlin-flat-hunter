@@ -6,6 +6,7 @@ Berlin-focused flat-hunting tool. Thin extension layer on top of [flathunter](ht
 - **Adds** auto-application via Selenium for Gewobag, WBM, Kleinanzeigen
 - **Adds** polygon-based area filtering
 - **Adds** Ollama (local LLM) listing filter and per-application gate
+- **Adds** Kleinanzeigen scam filter (keyword denylist for advance-fee templates)
 - **Adds** schema-change alerting (warn when a crawler returns 0 results or empty fields)
 - **Adds** SQLite statistics logging for unique notices
 
@@ -123,6 +124,7 @@ docker compose up -d
 |---|---|---|
 | Gewobag | ✅ ~36 listings | ⚠ form is an `app.wohnungshelden.de` Angular/NG-ZORRO SPA loaded via `iframe#contact-iframe`. We extract the iframe `src` and drive the SPA standalone, filling 9 fields (firstName/lastName/email/phoneNumber/message + street/houseNumber/zipCode/city). **Live submit is blocked by reCAPTCHA** — the applicator detects and aborts cleanly, logging the reason. `dry_run: true` works end-to-end (verified live 2026-04-28). |
 | WBM | ✅ 7 listings | ⚠ powermail form requires WBS info + privacy checkbox; we fill basic contact fields only. **Use `dry_run: true` first.** |
+| Howoge | ✅ via TYPO3 JSON endpoint | ✅ HTTP-only POST to the TYPO3 ext:HowRealestate `doiSend` form (firstName/lastName/email + harvested cHash + `__trustedProperties`). Triggers double-opt-in email; user clicks the confirmation link to finalise. No JS / captcha as of 2026-05. |
 | Gesobau | ✅ 6 listings | not implemented |
 | Kleinanzeigen | ✅ 27 listings | ⚠ requires login; selectors are best-effort. **Use `dry_run: true` first.** |
 | ImmobilienScout24 | ✅ via flathunter | ❌ not implemented (heavy anti-bot) |
@@ -160,6 +162,7 @@ This repo adds:
 |---|---|---|---|
 | Gewobag | Berlin public housing — biggest landlord | ✅ | ✅ |
 | WBM | Berlin Mitte public housing | ✅ | ✅ |
+| Howoge | Berlin east public housing | ✅ | ✅ |
 | Gesobau | Berlin north public housing | ✅ |  |
 
 ### Other Berlin public housing (not yet supported)
@@ -168,7 +171,6 @@ These sites are JS-rendered SPAs and would need Selenium-based crawlers
 (non-trivial to add):
 
 - **Degewo** — biggest Berlin public landlord besides Gewobag
-- **HOWOGE** — major Berlin public housing
 - **Stadt und Land, WBG 1892, Berlinovo** — smaller Berlin public housing
 
 PRs welcome.

@@ -5,8 +5,13 @@ on 2026-04-26. See README.md for current status. Use ``dry_run: true`` in config
 to fill forms without submitting (recommended on first use).
 """
 import os
+import re
 import time
 from typing import Any, Callable, Optional
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup, Tag
 
 from flathunter.abstract_processor import Processor
 from flathunter.logging import logger
@@ -564,6 +569,143 @@ class KleinanzeigenApplicator:
         self._close_driver()
 
 
+class HowogeApplicator:
+    """Submit Howoge "Anfrage senden" (Mietinteressent) form on a listing detail page.
+
+    Howoge runs the TYPO3 ext:HowRealestate plugin. The contact form is plain
+    HTML (no JS framework, no captcha as of 2026-05) and accepts a standard
+    ``application/x-www-form-urlencoded`` POST — so we drive it with ``requests``
+    rather than Selenium. The submission triggers a double-opt-in email; the
+    user must click the confirmation link before Howoge actually registers
+    interest. We treat a 200/302 response to the POST as success.
+
+    Layout (verified live 2026-05-02): The detail URL embeds an ``obid``
+    (e.g. ``1771-14536-9997``) which we lift out of the path. We then GET the
+    application form at
+    ``/immobiliensuche/wohnungssuche/besichtigung-vereinbaren/bewerbungsprozess.html``
+    with that obid; the response contains a ``<form>`` whose action URL embeds
+    a CSRF-style ``cHash`` token plus several ``__referrer`` / ``__trustedProperties``
+    hidden fields. We harvest every hidden input verbatim and POST them back
+    along with the user's firstName/lastName/email.
+    """
+
+    URL_MATCH = "howoge.de"
+    SITE_NAME = "Howoge"
+
+    _FORM_PATH = ("/immobiliensuche/wohnungssuche/besichtigung-vereinbaren/"
+                  "bewerbungsprozess.html")
+    _OBID_RE = re.compile(r"/detail/([0-9]+-[0-9]+-[0-9]+)")
+
+    def __init__(self, applicant: dict, dry_run: bool = False, profile_dir: Optional[str] = None):
+        self.applicant = applicant
+        self.dry_run = dry_run
+        # Howoge does not need a Chrome profile — kept in the signature so
+        # AutoApplicator can construct every applicator with the same args.
+        del profile_dir
+        self._session = requests.Session()
+        self._session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/126.0.0.0 Safari/537.36",
+            "Accept-Language": "de-DE,de;q=0.9,en;q=0.5",
+        })
+
+    def close(self):
+        try:
+            self._session.close()
+        except Exception:
+            pass
+
+    def apply(self, expose: dict) -> bool:
+        url = expose.get("url", "")
+        if self.URL_MATCH not in url:
+            return False
+        match = self._OBID_RE.search(url)
+        if not match:
+            logger.warning("Howoge: could not extract obid from %s", url)
+            return False
+        obid = match.group(1)
+
+        form_url = (
+            f"https://www.howoge.de{self._FORM_PATH}"
+            f"?tx_howrealestate_visitform%5Baction%5D=showVisitForm"
+            f"&tx_howrealestate_visitform%5Bcontroller%5D=Immoobject"
+            f"&tx_howrealestate_visitform%5Bobid%5D={obid}"
+        )
+        try:
+            resp = self._session.get(form_url, timeout=20)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Howoge: form GET failed for %s: %s", url, exc)
+            return False
+        if resp.status_code != 200:
+            logger.warning("Howoge: form GET returned HTTP %d for %s",
+                           resp.status_code, url)
+            return False
+
+        soup = BeautifulSoup(resp.content, "lxml")
+        form = soup.find("form", id="show-visit-form")
+        if not isinstance(form, Tag):
+            logger.warning("Howoge: visit form not found on %s — page layout changed",
+                           url)
+            return False
+
+        action = form.get("action") or ""
+        if isinstance(action, list):
+            action = action[0] if action else ""
+        if not isinstance(action, str) or not action:
+            logger.warning("Howoge: form action attribute missing on %s", url)
+            return False
+        action_url = urljoin(form_url, action)
+
+        payload: dict[str, str] = {}
+        for hidden in form.find_all("input", attrs={"type": "hidden"}):
+            if not isinstance(hidden, Tag):
+                continue
+            name = hidden.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            value = hidden.get("value", "")
+            if isinstance(value, list):
+                value = value[0] if value else ""
+            payload[name] = value if isinstance(value, str) else ""
+
+        last, first = WbmApplicator._split_name(self.applicant.get("name", ""))
+        payload["tx_howrealestate_visitform[visitRequest][firstName]"] = first
+        payload["tx_howrealestate_visitform[visitRequest][lastName]"] = (
+            last or self.applicant.get("name", "")
+        )
+        payload["tx_howrealestate_visitform[visitRequest][email]"] = (
+            self.applicant.get("email", "")
+        )
+
+        if not payload["tx_howrealestate_visitform[visitRequest][email]"]:
+            logger.warning("Howoge: applicant email missing — cannot submit %s", url)
+            return False
+
+        if self.dry_run:
+            logger.info("Howoge dry-run: form payload built (%d fields) for %s — submit skipped",
+                        len(payload), url)
+            return True
+
+        try:
+            post = self._session.post(action_url, data=payload, timeout=30,
+                                      allow_redirects=True)
+        except requests.exceptions.RequestException as exc:
+            logger.warning("Howoge: submit POST failed for %s: %s", url, exc)
+            return False
+        if post.status_code >= 400:
+            logger.warning("Howoge: submit POST returned HTTP %d for %s",
+                           post.status_code, url)
+            return False
+        # The DOI flow renders a "Bitte bestätigen Sie Ihre E-Mail-Adresse"
+        # confirmation page on success. We do not parse it — the 2xx is enough
+        # to know the form was accepted; the user still has to click the email
+        # link to actually finalise the interest registration.
+        logger.info("Howoge: interest submitted for %s (DOI email sent to %s)",
+                    url, payload["tx_howrealestate_visitform[visitRequest][email]"])
+        return True
+
+
 class AutoApplicator(Processor):
     """Auto-submit applications for Gewobag, WBM, and Kleinanzeigen exposes.
 
@@ -589,6 +731,7 @@ class AutoApplicator(Processor):
         self.applicators = [
             GewobagApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
             WbmApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
+            HowogeApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
             KleinanzeigenApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
         ]
         self.gate = None

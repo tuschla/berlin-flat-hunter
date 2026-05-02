@@ -77,6 +77,11 @@ class BerlinHunter(Hunter):
 
         self._ollama_filter = OllamaFilter(config) if config.ollama_enabled() else None
 
+        self._scam_filter = None
+        if config.scam_filter_enabled():
+            from berlin_flat_hunter.filters.scam_filter import ScamFilter
+            self._scam_filter = ScamFilter(config)
+
         # Build alert notifiers up-front so AutoApplicator (which receives
         # _dispatch_alerts as a callback) has a populated list ready by the
         # time it fires its first stale-selector or [MANUAL APPLY] alert.
@@ -265,6 +270,8 @@ class BerlinHunter(Hunter):
         if self._stats_processor is not None:
             builder.processors.append(self._stats_processor)
 
+        if self._scam_filter is not None:
+            builder.processors.append(self._scam_filter)
         if self._plz_filter is not None:
             builder.processors.append(self._plz_filter)
         if self._polygon_filter is not None:

@@ -3,6 +3,7 @@ from flathunter.config import YamlConfig
 
 from berlin_flat_hunter.crawlers.gesobau import Gesobau
 from berlin_flat_hunter.crawlers.gewobag import Gewobag
+from berlin_flat_hunter.crawlers.howoge import Howoge
 from berlin_flat_hunter.crawlers.wbm import Wbm
 
 
@@ -11,7 +12,7 @@ class BerlinConfig(YamlConfig):
 
     def init_searchers(self):
         super().init_searchers()
-        extra = [Gewobag(self), Wbm(self), Gesobau(self)]
+        extra = [Gewobag(self), Wbm(self), Gesobau(self), Howoge(self)]
         self.set_searchers(self.searchers() + extra)
 
     def ollama_enabled(self) -> bool:
@@ -60,3 +61,9 @@ class BerlinConfig(YamlConfig):
 
     def stats_db_path(self) -> str:
         return self.config.get("statistics", {}).get("db_path", "")
+
+    def scam_filter_enabled(self) -> bool:
+        return bool(self.config.get("scam_filter", {}).get("enabled", False))
+
+    def scam_filter_config(self) -> dict:
+        return self.config.get("scam_filter", {}) or {}
