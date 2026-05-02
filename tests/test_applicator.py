@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 from berlin_flat_hunter.applicator import (
     AutoApplicator,
     GewobagApplicator,
+    HowogeApplicator,
     KleinanzeigenApplicator,
     ManualApplyRequired,
     WbmApplicator,
@@ -122,6 +123,106 @@ class TestWbmApplicator(unittest.TestCase):
             self.assertFalse(self.app.apply(WBM_EXPOSE))
 
 
+HOWOGE_EXPOSE = {
+    "id": 7094,
+    "url": "https://www.howoge.de/immobiliensuche/wohnungssuche/detail/1771-14536-9997.html",
+    "title": "3-Zimmer-Wohnung (WBS 100-140)",
+    "address": "Streitstraße 5, 13587 Berlin (Hakenfelde)",
+    "rooms": "3 Zimmer",
+    "size": "73 m²",
+    "price": "803 €",
+    "crawler": "Howoge",
+}
+
+
+class TestHowogeApplicator(unittest.TestCase):
+
+    @staticmethod
+    def _form_html():
+        import os
+        path = os.path.join(os.path.dirname(__file__),
+                            "fixtures", "howoge_form.html")
+        with open(path) as f:
+            return f.read()
+
+    def test_url_match_field(self):
+        self.assertEqual(HowogeApplicator(APPLICANT).URL_MATCH, "howoge.de")
+
+    def test_skips_non_howoge_url(self):
+        self.assertFalse(HowogeApplicator(APPLICANT).apply(GEWOBAG_EXPOSE))
+
+    def test_skips_url_without_obid(self):
+        bad = dict(HOWOGE_EXPOSE,
+                   url="https://www.howoge.de/immobiliensuche/wohnungssuche.html")
+        self.assertFalse(HowogeApplicator(APPLICANT).apply(bad))
+
+    def test_dry_run_does_not_post(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT, dry_run=True)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=self._form_html(), status_code=200)
+            # No POST registered — would 404 if called.
+            self.assertTrue(app.apply(dict(HOWOGE_EXPOSE)))
+
+    def test_form_get_failure_returns_false(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, status_code=503)
+            self.assertFalse(app.apply(dict(HOWOGE_EXPOSE)))
+
+    def test_missing_email_returns_false(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator({"name": "Max Mustermann"})
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=self._form_html(), status_code=200)
+            self.assertFalse(app.apply(dict(HOWOGE_EXPOSE)))
+
+    def test_live_submit_posts_hidden_fields(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT, dry_run=False)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=self._form_html(), status_code=200)
+            posted = m.post(req_mock.ANY, status_code=200, text="ok")
+            self.assertTrue(app.apply(dict(HOWOGE_EXPOSE)))
+        self.assertTrue(posted.called)
+        body = posted.last_request.text
+        # Hidden CSRF blobs preserved verbatim.
+        self.assertIn("TRUSTED_PROPS_BLOB", body)
+        self.assertIn("REF_ARGS_BLOB", body)
+        # Per-listing immoobject id round-trips.
+        self.assertIn("immoobject", body)
+        # Applicant fields present.
+        self.assertIn("max%40example.com", body)
+        self.assertIn("Mustermann", body)
+        self.assertIn("Max", body)
+
+    def test_live_submit_targets_action_url_with_chash(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT, dry_run=False)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=self._form_html(), status_code=200)
+            posted = m.post(req_mock.ANY, status_code=200, text="ok")
+            app.apply(dict(HOWOGE_EXPOSE))
+        # action URL embeds the cHash token from the fixture form.
+        self.assertIn("cHash=ABCDEF1234567890", posted.last_request.url)
+
+    def test_post_500_returns_false(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT, dry_run=False)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=self._form_html(), status_code=200)
+            m.post(req_mock.ANY, status_code=500)
+            self.assertFalse(app.apply(dict(HOWOGE_EXPOSE)))
+
+    def test_form_missing_returns_false(self):
+        import requests_mock as req_mock
+        app = HowogeApplicator(APPLICANT, dry_run=False)
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text="<html><body>no form</body></html>", status_code=200)
+            self.assertFalse(app.apply(dict(HOWOGE_EXPOSE)))
+
+
 class TestKleinanzeigenApplicator(unittest.TestCase):
 
     def test_skips_non_kleinanzeigen_url(self):
@@ -158,13 +259,14 @@ class TestAutoApplicator(unittest.TestCase):
     def setUp(self):
         self.processor = AutoApplicator(FakeConfig())
 
-    def test_has_three_applicators(self):
-        self.assertEqual(len(self.processor.applicators), 3)
+    def test_has_four_applicators(self):
+        self.assertEqual(len(self.processor.applicators), 4)
 
     def test_applicator_order(self):
         self.assertIsInstance(self.processor.applicators[0], GewobagApplicator)
         self.assertIsInstance(self.processor.applicators[1], WbmApplicator)
-        self.assertIsInstance(self.processor.applicators[2], KleinanzeigenApplicator)
+        self.assertIsInstance(self.processor.applicators[2], HowogeApplicator)
+        self.assertIsInstance(self.processor.applicators[3], KleinanzeigenApplicator)
 
     def test_process_expose_returns_dict(self):
         for app in self.processor.applicators:
@@ -187,15 +289,18 @@ class TestAutoApplicator(unittest.TestCase):
         m0 = self.processor.applicators[0].apply = MagicMock(return_value=True)
         m1 = self.processor.applicators[1].apply = MagicMock(return_value=False)
         m2 = self.processor.applicators[2].apply = MagicMock(return_value=False)
+        m3 = self.processor.applicators[3].apply = MagicMock(return_value=False)
         self.processor.process_expose(dict(GEWOBAG_EXPOSE))
         m0.assert_called_once()
         m1.assert_not_called()
         m2.assert_not_called()
+        m3.assert_not_called()
 
     def test_later_applicator_tried_after_earlier_fails(self):
         m0 = self.processor.applicators[0].apply = MagicMock(return_value=False)
         m1 = self.processor.applicators[1].apply = MagicMock(return_value=True)
         self.processor.applicators[2].apply = MagicMock(return_value=False)
+        self.processor.applicators[3].apply = MagicMock(return_value=False)
         self.processor.process_expose(dict(WBM_EXPOSE))
         m0.assert_called_once()
         m1.assert_called_once()
