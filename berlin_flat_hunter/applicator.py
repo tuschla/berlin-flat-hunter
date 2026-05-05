@@ -88,9 +88,20 @@ def _chrome_driver(headless: bool = True, profile_dir: Optional[str] = None):
 
 
 def _fill_field(driver, selector: str, value: str) -> bool:
-    """Try each CSS selector in a comma-separated list; fill first match. Returns True if filled."""
+    """Try each CSS selector in a comma-separated list; fill first match. Returns True if filled.
+
+    Catches ``NoSuchElementException`` and ``ElementNotInteractableException``
+    only — these are the expected "selector did not match / element hidden"
+    paths and we want to fall through to the next selector. Driver wedges
+    (``WebDriverException``, ``TimeoutException``) propagate so the caller
+    can recycle the session instead of silently logging "no fields filled".
+    """
     if not value:
         return False
+    from selenium.common.exceptions import (
+        ElementNotInteractableException,
+        NoSuchElementException,
+    )
     for raw in selector.split(","):
         sel = raw.strip()
         if not sel:
@@ -100,7 +111,7 @@ def _fill_field(driver, selector: str, value: str) -> bool:
             el.clear()
             el.send_keys(value)
             return True
-        except Exception:
+        except (NoSuchElementException, ElementNotInteractableException):
             continue
     return False
 

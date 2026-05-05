@@ -319,11 +319,17 @@ class BerlinHunter(Hunter):
     def _configured_crawler_names(self) -> list[str]:
         """Names of searchers whose URL_PATTERN matches at least one configured
         target URL. Centralised so _record_health and _record_total_failure
-        agree on which crawlers count as 'configured-and-expected-to-work'."""
+        agree on which crawlers count as 'configured-and-expected-to-work'.
+
+        Uses ``.search()`` to stay consistent with ``crawl_for_exposes`` (which
+        also dispatches via ``.search()``). ``.match()`` only succeeds when the
+        pattern hits the very start of the URL, so a URL_PATTERN that matched
+        at dispatch time could be silently excluded from health monitoring.
+        """
         target_urls = self.config.target_urls()
         names: list[str] = []
         for searcher in self.config.searchers():
-            if any(searcher.URL_PATTERN.match(url) for url in target_urls):
+            if any(searcher.URL_PATTERN.search(url) for url in target_urls):
                 names.append(searcher.get_name())
         return names
 
