@@ -61,18 +61,20 @@ class TestFillField(unittest.TestCase):
     """_fill_field tries selectors in order, fills the first match."""
 
     def test_fills_first_matching_selector(self):
+        from selenium.common.exceptions import NoSuchElementException
         driver = MagicMock()
         # first selector throws, second succeeds
         field = MagicMock()
-        driver.find_element.side_effect = [Exception("not found"), field]
+        driver.find_element.side_effect = [NoSuchElementException("not found"), field]
         result = _fill_field(driver, "input.a, input.b", "value")
         self.assertTrue(result)
         field.clear.assert_called_once()
         field.send_keys.assert_called_once_with("value")
 
     def test_returns_false_when_no_selector_matches(self):
+        from selenium.common.exceptions import NoSuchElementException
         driver = MagicMock()
-        driver.find_element.side_effect = Exception("not found")
+        driver.find_element.side_effect = NoSuchElementException("not found")
         result = _fill_field(driver, "input.a, input.b", "value")
         self.assertFalse(result)
 
@@ -89,6 +91,16 @@ class TestFillField(unittest.TestCase):
         _fill_field(driver, "input.a, input.b", "value")
         # Should only try selector once (the first one matches)
         self.assertEqual(driver.find_element.call_count, 1)
+
+    def test_driver_wedge_propagates(self):
+        """A WebDriverException is a session-dead signal — must NOT be
+        swallowed as 'next selector', otherwise the caller logs a misleading
+        'no fields filled' instead of recycling the driver."""
+        from selenium.common.exceptions import WebDriverException
+        driver = MagicMock()
+        driver.find_element.side_effect = WebDriverException("session deleted")
+        with self.assertRaises(WebDriverException):
+            _fill_field(driver, "input.a, input.b", "value")
 
 
 class TestGewobagApplicator(unittest.TestCase):
@@ -295,6 +307,29 @@ class TestAutoApplicator(unittest.TestCase):
         m1.assert_not_called()
         m2.assert_not_called()
         m3.assert_not_called()
+
+    def test_exception_in_non_target_applicator_does_not_stop_chain(self):
+        """A generic Exception from an applicator whose URL_MATCH does NOT
+        match the expose URL must be caught and the chain must continue —
+        otherwise a Selenium import error in the first applicator would
+        permanently shadow every other site's apply path."""
+        self.processor.applicators[0].apply = MagicMock(
+            side_effect=RuntimeError("selenium broke"))
+        target = self.processor.applicators[1].apply = MagicMock(return_value=True)
+        result = self.processor.process_expose(dict(WBM_EXPOSE))
+        target.assert_called_once()
+        self.assertTrue(result.get("applied"))
+
+    def test_exception_in_target_applicator_logged(self):
+        """When the URL-matched applicator itself raises, the failure must
+        surface in the log (warning level) so a wedged Selenium / parser
+        crash isn't silently masked as 'no fields filled'."""
+        self.processor.applicators[1].apply = MagicMock(
+            side_effect=RuntimeError("driver wedged"))
+        with self.assertLogs("flathunt", level="WARNING") as cm:
+            self.processor.process_expose(dict(WBM_EXPOSE))
+        self.assertTrue(any("apply raised" in line and "driver wedged" in line
+                            for line in cm.output))
 
     def test_later_applicator_tried_after_earlier_fails(self):
         m0 = self.processor.applicators[0].apply = MagicMock(return_value=False)

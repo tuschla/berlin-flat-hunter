@@ -72,13 +72,10 @@ class Howoge(Crawler):
             "tx_howrealestate_json_list[page]": str(page),
             "tx_howrealestate_json_list[limit]": str(_PAGE_SIZE),
         }
-        try:
-            resp = _SESSION.post(JSON_ENDPOINT, data=data, headers=self.HEADERS, timeout=20)
-        except requests.exceptions.RequestException as exc:
-            logger.warning("Howoge: request failed for page %d: %s", page, exc)
-            return []
-        if resp.status_code != 200:
-            logger.warning("Howoge: HTTP %d for page %d", resp.status_code, page)
+        resp = self._post_with_retry(JSON_ENDPOINT, data=data)
+        if resp is None or resp.status_code != 200:
+            if resp is not None:
+                logger.warning("Howoge: HTTP %d for page %d", resp.status_code, page)
             return []
         try:
             payload = resp.json()
@@ -87,6 +84,27 @@ class Howoge(Crawler):
             return []
         items = payload.get("immoobjects")
         return items if isinstance(items, list) else []
+
+    def _post_with_retry(self, url: str, data: dict):
+        """POST ``url`` with one retry on 5xx / transient network failure.
+        Returns the final Response (which may still be non-200) or None on
+        hard failure. Mirrors Gewobag._fetch_with_retry — a single transient
+        5xx blip would otherwise tick the schema-monitor's empty-crawl counter
+        and start a false-alarm ladder.
+        """
+        for attempt in range(2):
+            try:
+                resp = _SESSION.post(url, data=data, headers=self.HEADERS, timeout=20)
+            except requests.exceptions.RequestException as exc:
+                if attempt == 0:
+                    logger.debug("Howoge: transient POST error, retrying: %s", exc)
+                    continue
+                logger.warning("Howoge: request failed for %s: %s", url, exc)
+                return None
+            if 500 <= resp.status_code < 600 and attempt == 0:
+                continue
+            return resp
+        return None
 
     def _parse_item(self, item: dict) -> Optional[dict]:
         uid = item.get("uid")

@@ -172,6 +172,29 @@ class TestHowogeCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertEqual(results, [])
 
+    def test_5xx_retries_then_succeeds(self):
+        """A single transient 5xx must trigger one retry — second response wins."""
+        items = _payload()
+        empty = {"immocount": 0, "teasercount": 0, "immoobjects": []}
+        with req_mock.Mocker() as m:
+            m.register_uri(req_mock.POST, JSON_ENDPOINT, [
+                {"text": "", "status_code": 503},
+                {"json": items, "status_code": 200},
+                {"json": empty, "status_code": 200},
+            ])
+            results = self.crawler.get_results(SEARCH_URL)
+        self.assertEqual(len(results), 2)
+
+    def test_5xx_persistent_returns_empty(self):
+        """Both attempts 5xx → give up, return empty (not raise)."""
+        with req_mock.Mocker() as m:
+            m.register_uri(req_mock.POST, JSON_ENDPOINT, [
+                {"text": "", "status_code": 503},
+                {"text": "", "status_code": 503},
+            ])
+            results = self.crawler.get_results(SEARCH_URL)
+        self.assertEqual(results, [])
+
     def test_extract_data_returns_empty(self):
         # JSON crawler does not use HTML soup path.
         self.assertEqual(
