@@ -108,6 +108,70 @@ class TestStatsLogger(unittest.TestCase):
         self.assertFalse(self.stats.log(a))
         self.assertEqual(self.stats.count_total(), 1)
 
+    def test_stores_cold_warm_price(self):
+        expose = {**EXPOSE_A, "price_cold": "900 €", "price_warm": "1100 €"}
+        self.stats.log(expose)
+        row = self.stats.recent(limit=1)[0]
+        self.assertEqual(row["price_cold"], "900 €")
+        self.assertEqual(row["price_warm"], "1100 €")
+
+    def test_backfill_fills_empty_fields_on_resight(self):
+        """Teaser first, concrete data later — empty fields must fill in."""
+        teaser = {"id": 7, "crawler": "Gewobag", "url": "https://g/7/",
+                  "title": "Neubau", "address": "", "rooms": "", "size": "",
+                  "price": "Auf Anfrage", "price_cold": "", "price_warm": ""}
+        self.assertTrue(self.stats.log(teaser))
+        published = {**teaser, "address": "Weg 1, 12557 Berlin", "rooms": "4",
+                     "size": "109,92 m²", "price_cold": "1.483,92 Euro",
+                     "price_warm": "1.901,62 Euro"}
+        self.assertFalse(self.stats.log(published))  # re-sight, not new
+        self.assertEqual(self.stats.count_total(), 1)
+        row = self.stats.recent(limit=1)[0]
+        self.assertEqual(row["address"], "Weg 1, 12557 Berlin")
+        self.assertEqual(row["rooms"], "4")
+        self.assertEqual(row["size"], "109,92 m²")
+        self.assertEqual(row["price_cold"], "1.483,92 Euro")
+
+    def test_backfill_does_not_overwrite_populated_fields(self):
+        self.stats.log({**EXPOSE_A, "id": 8})
+        self.stats.log({**EXPOSE_A, "id": 8, "rooms": "99", "price": "1 €"})
+        row = self.stats.recent(limit=1)[0]
+        self.assertEqual(row["rooms"], EXPOSE_A["rooms"])  # unchanged
+        self.assertEqual(row["price"], EXPOSE_A["price"])
+
+    def test_last_seen_ts_bumped_on_resight(self):
+        self.stats.log({**EXPOSE_A, "id": 9})
+        first = self.stats.recent(limit=1)[0]["last_seen_ts"]
+        time.sleep(0.01)
+        self.stats.log({**EXPOSE_A, "id": 9})
+        second = self.stats.recent(limit=1)[0]["last_seen_ts"]
+        self.assertGreater(second, first)
+        # first_seen_ts must be preserved across the re-sight
+        self.assertEqual(self.stats.recent(limit=1)[0]["first_seen_ts"],
+                         first)
+
+    def test_migrates_legacy_schema_without_new_columns(self):
+        """A pre-existing DB lacking price_cold/price_warm/last_seen_ts opens clean."""
+        import sqlite3
+        legacy = _tmp_db()
+        con = sqlite3.connect(legacy)
+        con.executescript(
+            "CREATE TABLE notices (id INTEGER NOT NULL, crawler TEXT NOT NULL, "
+            "url TEXT, title TEXT, address TEXT, rooms TEXT, size TEXT, price TEXT, "
+            "first_seen_ts REAL NOT NULL, PRIMARY KEY (id, crawler));"
+        )
+        con.execute("INSERT INTO notices VALUES (5,'Gewobag','u','t','a','1','50 m²','9 €',1.0)")
+        con.commit(); con.close()
+        migrated = StatsLogger(legacy)
+        try:
+            self.assertEqual(migrated.count_total(), 1)
+            # new column readable (NULL for the legacy row), new writes work
+            self.assertIsNone(migrated.recent(limit=1)[0]["price_cold"])
+            self.assertTrue(migrated.log({**EXPOSE_A, "id": 6, "price_cold": "7 €"}))
+        finally:
+            migrated.close()
+            os.unlink(legacy)
+
 
 class TestStatsProcessor(unittest.TestCase):
 
