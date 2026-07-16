@@ -296,11 +296,25 @@ class BerlinHunter(Hunter):
         A crawler is only health-tracked if at least one configured URL matches
         its URL_PATTERN — otherwise an unused crawler would be flagged as broken.
         Any alerts raised are pushed through configured notifiers.
+
+        Crawlers that expose ``last_crawl_site_reported_empty=True`` had a
+        successful crawl that legitimately found zero listings (e.g. WBM's
+        "keine verfügbaren Angebote" state) — recorded as healthy, not empty.
         """
         alerts = list(self.schema_monitor.record_crawl(raw_exposes))
         seen = {e.get("crawler") for e in raw_exposes}
+        # Strict `is True` — MagicMock searchers in tests auto-create truthy
+        # attribute values, which would otherwise mark every crawler as empty.
+        site_empty_names = {
+            searcher.get_name()
+            for searcher in self.config.searchers()
+            if getattr(searcher, "last_crawl_site_reported_empty", False) is True
+        }
         for name in self._configured_crawler_names():
             if name in seen:
+                continue
+            if name in site_empty_names:
+                alerts.extend(self.schema_monitor.record_site_reported_empty(name))
                 continue
             alerts.extend(self.schema_monitor.record_empty_crawl(name))
         self._dispatch_alerts(alerts)

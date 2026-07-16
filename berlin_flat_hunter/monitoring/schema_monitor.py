@@ -111,6 +111,19 @@ class SchemaMonitor:
         self._save()
         return alerts
 
+    def record_site_reported_empty(self, crawler_name: str) -> list[str]:
+        """Site itself signalled 'no listings currently available' (e.g. WBM's
+        "Leider haben wir derzeit keine verfügbaren Angebote"). The crawl
+        succeeded — there just aren't any apartments today. Treat as a healthy
+        cycle so the consecutive-empty counter doesn't tick and no alert fires.
+        """
+        health = self._get_health(crawler_name)
+        health.consecutive_empty = 0
+        health.consecutive_alerts = 0
+        health.last_success_ts = time.time()
+        self._save()
+        return []
+
     def get_health_summary(self) -> dict:
         return {name: h.to_dict() for name, h in self._health.items()}
 

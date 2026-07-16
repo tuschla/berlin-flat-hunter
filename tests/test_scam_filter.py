@@ -114,6 +114,33 @@ class TestScamFilter(unittest.TestCase):
             list(self.f.process_exposes([_ka(title="Auslandsumzug ahoy")]))
         self.assertTrue(any("auslandsumzug" in line.lower() for line in cm.output))
 
+    def test_drops_pattern_in_description(self):
+        """Description body is where real KA scams put their tells — title is boring."""
+        expose = _ka(title="2-Zimmer-Wohnung Neukölln", address="Karl-Marx-Str.")
+        expose["description"] = ("Hello, I am currently abroad but you can contact me "
+                                 "at owner@example.com via WhatsApp for viewing.")
+        out = list(self.f.process_exposes([expose]))
+        self.assertEqual(out, [])
+
+    def test_drops_email_in_description(self):
+        expose = _ka(title="2-Zimmer Neukölln", address="Beispielstraße 1")
+        expose["description"] = "Bitte melden Sie sich per E-Mail: scammer@example.com"
+        out = list(self.f.process_exposes([expose]))
+        self.assertEqual(out, [])
+
+    def test_email_in_description_flag_respects_disabled(self):
+        f = ScamFilter(FakeConfig({"enabled": True, "flag_email_in_title": False}))
+        expose = _ka()
+        expose["description"] = "Kontakt: real@landlord.de"
+        out = list(f.process_exposes([expose]))
+        self.assertEqual(len(out), 1)
+
+    def test_missing_description_still_scans_title_address(self):
+        # Backward compat: exposes without description still get filtered on
+        # title+address patterns.
+        out = list(self.f.process_exposes([_ka(title="Wegen Auslandsumzug")]))
+        self.assertEqual(out, [])
+
 
 if __name__ == "__main__":
     unittest.main()

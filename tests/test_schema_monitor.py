@@ -118,6 +118,26 @@ class TestSchemaMonitor(unittest.TestCase):
         self.assertEqual(health["Gewobag"]["consecutive_empty"], 2)
         os.unlink(path)
 
+    def test_record_site_reported_empty_returns_no_alerts(self):
+        mon, path = self._new_monitor({"monitoring": {"consecutive_empty_threshold": 1}})
+        self.assertEqual(mon.record_site_reported_empty("Wbm"), [])
+
+    def test_record_site_reported_empty_resets_streak(self):
+        mon, path = self._new_monitor({"monitoring": {"consecutive_empty_threshold": 2}})
+        mon.record_empty_crawl("Wbm")
+        mon.record_empty_crawl("Wbm")  # fires alert — consecutive_alerts=1
+        mon.record_empty_crawl("Wbm")  # counter=3
+        mon.record_site_reported_empty("Wbm")
+        h = mon.get_health_summary()["Wbm"]
+        self.assertEqual(h["consecutive_empty"], 0)
+        self.assertEqual(h["consecutive_alerts"], 0)
+
+    def test_record_site_reported_empty_updates_last_success_ts(self):
+        mon, path = self._new_monitor()
+        before = time.time()
+        mon.record_site_reported_empty("Wbm")
+        self.assertGreaterEqual(mon.get_health_summary()["Wbm"]["last_success_ts"], before)
+
     def test_state_saved_to_json(self):
         mon, path = _monitor()
         mon.record_empty_crawl("Gewobag")

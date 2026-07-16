@@ -5,6 +5,7 @@ from typing import Optional
 from bs4 import BeautifulSoup, Tag
 
 from flathunter.abstract_crawler import Crawler
+from flathunter.logging import logger
 
 BASE_URL = "https://www.wbm.de"
 
@@ -12,6 +13,12 @@ BASE_URL = "https://www.wbm.de"
 class Wbm(Crawler):
 
     URL_PATTERN = re.compile(r"https://www\.wbm\.de")
+
+    # Set to True by get_results() when the WBM listings page rendered its
+    # intentional "no available listings today" state — distinguishes a
+    # legitimate empty result from a scraping failure so the schema monitor
+    # doesn't cry wolf. Consumed by BerlinHunter._record_health.
+    last_crawl_site_reported_empty: bool = False
 
     def get_page(self, search_url, driver=None, page_no=None) -> BeautifulSoup:
         url = search_url
@@ -22,9 +29,15 @@ class Wbm(Crawler):
 
     def get_results(self, search_url: str, max_pages: Optional[int] = None) -> list:
         entries: list = []
+        self.last_crawl_site_reported_empty = False
         page_no = 1
         while True:
             soup = self.get_page(search_url, page_no=page_no)
+            if page_no == 1 and self._is_site_reported_empty(soup):
+                logger.info("WBM: site reports no available listings "
+                            "(intentional empty state, not a scrape failure)")
+                self.last_crawl_site_reported_empty = True
+                return []
             page_entries = self.extract_data(soup)
             if not page_entries:
                 break
@@ -35,6 +48,25 @@ class Wbm(Crawler):
                 break
             page_no += 1
         return entries
+
+    @staticmethod
+    def _is_site_reported_empty(soup: BeautifulSoup) -> bool:
+        """WBM's TYPO3 openimmo container tags itself ``empty`` and renders a
+        ``.openimmo-no-offer-avilable`` (sic) block when no apartments are
+        currently listed. Either marker is a reliable signal that the page
+        rendered correctly with zero results."""
+        if not isinstance(soup, Tag):
+            return False
+        if soup.select_one(".openimmo-no-offer-avilable"):
+            return True
+        container = soup.select_one("div.tx-openimmo.search")
+        if container is not None:
+            classes = container.get("class") or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            if "empty" in classes:
+                return True
+        return False
 
     def extract_data(self, raw_data: BeautifulSoup) -> list:
         entries = []
