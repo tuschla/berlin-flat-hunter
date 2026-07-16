@@ -34,6 +34,8 @@ _SKIP_KEYWORDS = frozenset([
 ])
 
 _WHITESPACE_RE = re.compile(r"\s+")
+# A real rent value contains a digit; teaser listings show "Auf Anfrage" here.
+_HAS_AMOUNT = re.compile(r"\d")
 
 
 def _normalise(text: str) -> str:
@@ -161,6 +163,11 @@ class Gewobag(Crawler):
 
         # Prefer Grundmiete (Kaltmiete) over Gesamtmiete regardless of row order
         price = grundmiete or gesamtmiete
+        # Keep the cold/warm split for data analysis, but only when the value is
+        # a real amount — teaser listings render "Auf Anfrage" here, and storing
+        # that would block the re-sight backfill once the real figure appears.
+        price_cold = grundmiete if _HAS_AMOUNT.search(grundmiete) else ""
+        price_warm = gesamtmiete if _HAS_AMOUNT.search(gesamtmiete) else ""
 
         og_img = soup.find("meta", property="og:image")
         image = ""
@@ -176,6 +183,8 @@ class Gewobag(Crawler):
             "rooms": rooms,
             "size": size,
             "price": price,
+            "price_cold": price_cold,
+            "price_warm": price_warm,
             "image": image,
             "crawler": self.get_name(),
         }

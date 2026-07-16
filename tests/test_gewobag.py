@@ -111,11 +111,44 @@ class TestGewobagCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertTrue(any("1.460" in r["price"] for r in results))
 
+    def test_price_cold_is_grundmiete(self):
+        with req_mock.Mocker() as m:
+            _register_mocks(m)
+            results = self.crawler.get_results(SEARCH_URL)
+        self.assertTrue(any("1.460,43" in r.get("price_cold", "") for r in results))
+
+    def test_price_warm_is_gesamtmiete(self):
+        with req_mock.Mocker() as m:
+            _register_mocks(m)
+            results = self.crawler.get_results(SEARCH_URL)
+        self.assertTrue(any("1.871,51" in r.get("price_warm", "") for r in results))
+
     def test_image_from_og_tag(self):
         with req_mock.Mocker() as m:
             _register_mocks(m)
             results = self.crawler.get_results(SEARCH_URL)
         self.assertTrue(any(r["image"] for r in results))
+
+    def test_auf_anfrage_leaves_cold_warm_empty(self):
+        """Teaser listings show 'Auf Anfrage' — cold/warm must stay empty so the
+        stats backfill can fill them once the real figures appear."""
+        item = {"id": 999, "slug": "teaser",
+                "link": "https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/teaser/",
+                "title": {"rendered": "Neubauwohnung nur mit WBS"}}
+        detail = ("<html><body><table class='overview-table'>"
+                  "<tr><th>Grundmiete</th><td>Auf Anfrage</td></tr>"
+                  "<tr><th>Anschrift</th><td>,</td></tr>"
+                  "</table></body></html>")
+        with req_mock.Mocker() as m:
+            m.register_uri(req_mock.GET, WP_API_URL,
+                           [{"json": [item], "status_code": 200},
+                            {"json": [], "status_code": 200}])
+            m.register_uri(req_mock.GET, item["link"], text=detail, status_code=200)
+            results = self.crawler.get_results(SEARCH_URL)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["price_cold"], "")
+        self.assertEqual(results[0]["price_warm"], "")
+        self.assertEqual(results[0]["price"], "Auf Anfrage")  # legacy field keeps it
 
     def test_detail_404_excluded(self):
         with req_mock.Mocker() as m:
