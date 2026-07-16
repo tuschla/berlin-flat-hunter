@@ -367,6 +367,11 @@ class WbmApplicator:
                 WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, "form.powermail_form"))
                 )
+                # WBM overlays a Klaro cookie-consent modal on top of the
+                # form. Without dismissing it the privacy checkbox and submit
+                # button aren't clickable — Selenium throws "element click
+                # intercepted" and the whole apply silently fails.
+                self._dismiss_cookie_banner(driver)
                 last, first = self._split_name(self.applicant.get("name", ""))
                 filled = sum([
                     _fill_field(driver, self._FIELD_LASTNAME, last),
@@ -410,6 +415,38 @@ class WbmApplicator:
         if len(parts) == 2:
             return parts[1], parts[0]
         return full_name, ""
+
+    @staticmethod
+    def _dismiss_cookie_banner(driver) -> None:
+        """Best-effort dismissal of WBM's Klaro cookie-consent modal.
+
+        Tries the modern Klaro selectors first, then a couple of legacy
+        variants. Never raises — the applicator continues even if no banner
+        was present or all selectors miss (element-click-intercepted is the
+        real signal we care about, and that gets caught downstream)."""
+        from selenium.webdriver.common.by import By
+        selectors = (
+            # Klaro (WBM's current provider, 2026-07)
+            "#klaro .cm-btn.cm-btn-accept-all",
+            "#klaro .cm-btn.cm-btn-success",
+            "#klaro button[data-full-consent]",
+            # Historical / cookie-action fallbacks seen on WBM
+            "a.cookie-action[data-action='accept']",
+            "#cn-accept-cookie",
+        )
+        for selector in selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, selector)
+            except Exception:
+                continue
+            for el in els:
+                try:
+                    if el.is_displayed():
+                        el.click()
+                        time.sleep(0.5)
+                        return
+                except Exception:
+                    continue
 
 
 class KleinanzeigenApplicator:

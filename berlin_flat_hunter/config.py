@@ -1,9 +1,11 @@
 """BerlinConfig — extends flathunter's YamlConfig with Berlin-specific crawlers"""
 from flathunter.config import YamlConfig
+from flathunter.crawler.kleinanzeigen import Kleinanzeigen as _UpstreamKleinanzeigen
 
 from berlin_flat_hunter.crawlers.gesobau import Gesobau
 from berlin_flat_hunter.crawlers.gewobag import Gewobag
 from berlin_flat_hunter.crawlers.howoge import Howoge
+from berlin_flat_hunter.crawlers.kleinanzeigen import Kleinanzeigen
 from berlin_flat_hunter.crawlers.wbm import Wbm
 
 
@@ -12,8 +14,13 @@ class BerlinConfig(YamlConfig):
 
     def init_searchers(self):
         super().init_searchers()
+        # Replace flathunter's upstream Kleinanzeigen crawler with our subclass
+        # that captures the list-page description snippet (feeds ScamFilter).
+        upstream = self.searchers()
+        replaced = [Kleinanzeigen(self) if isinstance(s, _UpstreamKleinanzeigen) else s
+                    for s in upstream]
         extra = [Gewobag(self), Wbm(self), Gesobau(self), Howoge(self)]
-        self.set_searchers(self.searchers() + extra)
+        self.set_searchers(replaced + extra)
 
     def ollama_enabled(self) -> bool:
         cfg = self.config.get("ollama", {})

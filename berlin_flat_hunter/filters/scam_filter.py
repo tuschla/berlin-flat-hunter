@@ -3,13 +3,15 @@
 Kleinanzeigen attracts a high share of advance-fee scams: rock-bottom rent in
 prime areas, landlord "currently abroad" / "in another country", contact moves
 to WhatsApp, deposit via Western Union, keys mailed without viewing. The
-common signal is *language in the title or address* — scammers reuse the same
-templates across hundreds of postings.
+tells almost always appear in the *description body* (titles stay boring like
+"3-Zimmer-Wohnung Neukölln"), so we scan title + address + description.
 
 This filter drops exposes whose ``crawler == "Kleinanzeigen"`` (or whose URL
-host contains ``kleinanzeigen.de``) when their title or address matches any
+host contains ``kleinanzeigen.de``) when the combined haystack matches any
 substring in a configurable denylist. Other crawlers pass through untouched —
-the public-housing sites don't need this.
+the public-housing sites don't need this. The description snippet is captured
+for free by ``berlin_flat_hunter.crawlers.kleinanzeigen.Kleinanzeigen`` off the
+list page — no per-listing detail fetches.
 
 Config shape (top-level)::
 
@@ -129,15 +131,22 @@ class ScamFilter(Processor):
         return "kleinanzeigen.de" in host
 
     def _scam_reason(self, expose: dict) -> Optional[str]:
+        title = expose.get("title", "") or ""
         haystack = " ".join(filter(None, [
-            expose.get("title", ""),
+            title,
             expose.get("address", ""),
+            expose.get("description", ""),
         ])).lower()
         if not haystack:
             return None
         for pattern in self._patterns:
             if pattern in haystack:
                 return pattern
-        if self._flag_email and _EMAIL_RE.search(expose.get("title", "")):
+        if self._flag_email and _EMAIL_RE.search(title):
             return "email-in-title"
+        # Description-body emails are also a strong scam signal (off-platform
+        # contact funnel). The list-page description ships with the crawl, so
+        # scanning it is free.
+        if self._flag_email and _EMAIL_RE.search(expose.get("description", "") or ""):
+            return "email-in-description"
         return None

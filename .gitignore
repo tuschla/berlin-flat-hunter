@@ -12,4 +12,7 @@ profiles/*.yaml
 *.db
 *.sqlite
 schema_monitor.json
+# Runtime per-profile state: stats DBs (+ sqlite -wal/-shm sidecars) and
+# schema-monitor snapshots. Never code — keep the whole tree out of git.
+data/
 .claude/

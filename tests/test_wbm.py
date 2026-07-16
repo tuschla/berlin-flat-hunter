@@ -156,6 +156,38 @@ class TestWbmCrawler(unittest.TestCase):
         soup = BeautifulSoup(html, "html.parser")
         self.assertEqual(self.crawler.extract_data(soup), [])
 
+    def test_site_reported_empty_via_class(self):
+        """Container carries the ``empty`` class → site says 'no listings'."""
+        html = '<html><body><div class="tx-openimmo search bootstrap empty"></div></body></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertTrue(self.crawler._is_site_reported_empty(soup))
+
+    def test_site_reported_empty_via_no_offer_block(self):
+        html = '<html><body><div class="openimmo-no-offer-avilable"><p>Leider…</p></div></body></html>'
+        soup = BeautifulSoup(html, "html.parser")
+        self.assertTrue(self.crawler._is_site_reported_empty(soup))
+
+    def test_site_reported_empty_false_on_populated_page(self):
+        soup = BeautifulSoup(_fixture_html(), "html.parser")
+        self.assertFalse(self.crawler._is_site_reported_empty(soup))
+
+    def test_get_results_sets_flag_on_empty_state(self):
+        empty_html = ('<html><body><div class="tx-openimmo search bootstrap empty">'
+                      '<div class="openimmo-no-offer-avilable">nope</div></div></body></html>')
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=empty_html)
+            results = self.crawler.get_results(SEARCH_URL, max_pages=1)
+        self.assertEqual(results, [])
+        self.assertTrue(self.crawler.last_crawl_site_reported_empty)
+
+    def test_get_results_clears_flag_on_populated_page(self):
+        self.crawler.last_crawl_site_reported_empty = True  # simulate stale flag
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, text=_fixture_html())
+            results = self.crawler.get_results(SEARCH_URL, max_pages=1)
+        self.assertGreater(len(results), 0)
+        self.assertFalse(self.crawler.last_crawl_site_reported_empty)
+
 
 if __name__ == "__main__":
     unittest.main()
