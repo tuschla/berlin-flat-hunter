@@ -4,8 +4,11 @@ import sys
 import time
 import unittest
 
+import requests_mock as req_mock  # noqa: E402
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 import crawler_watchdog as wd  # noqa: E402
+import probe_url  # noqa: E402
 
 
 class TestDownDetection(unittest.TestCase):
@@ -96,6 +99,50 @@ class TestHelpers(unittest.TestCase):
         prompt = wd.build_prompt("wg", "Wbm",
                                  {"last_success_ts": 0, "consecutive_empty": 5}, [])
         self.assertIn("ITALIAN", prompt)
+
+    def test_prompt_tells_triage_to_use_box_side_probe(self):
+        prompt = wd.build_prompt("single", "Kleinanzeigen",
+                                 {"last_success_ts": 0, "consecutive_empty": 9}, [])
+        self.assertIn("probe_url.py", prompt)
+        self.assertIn("WebFetch", prompt)  # warns about the egress trap
+
+    def test_probe_is_allowlisted_for_triage(self):
+        self.assertIn("Bash(.venv/bin/python scripts/probe_url.py:*)",
+                      wd.CLAUDE_ALLOWED_TOOLS)
+
+
+class TestProbeUrl(unittest.TestCase):
+
+    def test_reports_status_and_listing_marker(self):
+        url = "https://www.kleinanzeigen.de/x"
+        html = '<html><body><div id="srchrslt-adtable">ok</div></body></html>'
+        with req_mock.Mocker() as m:
+            m.get(url, text=html, status_code=200)
+            out = probe_url.probe(url)
+        self.assertIn("HTTP 200", out)
+        self.assertIn("srchrslt-adtable", out)
+
+    def test_reports_captcha_marker(self):
+        url = "https://www.kleinanzeigen.de/y"
+        with req_mock.Mocker() as m:
+            m.get(url, text="please solve the captcha", status_code=200)
+            out = probe_url.probe(url)
+        self.assertIn("captcha", out)
+
+    def test_no_markers_note(self):
+        url = "https://example.com/z"
+        with req_mock.Mocker() as m:
+            m.get(url, text="<html>nothing here</html>", status_code=200)
+            out = probe_url.probe(url)
+        self.assertIn("no known", out)
+
+    def test_fetch_error_is_reported_not_raised(self):
+        url = "https://example.com/err"
+        with req_mock.Mocker() as m:
+            import requests
+            m.get(url, exc=requests.exceptions.ConnectTimeout)
+            out = probe_url.probe(url)
+        self.assertTrue(out.startswith("FETCH_ERROR"))
 
 
 if __name__ == "__main__":
