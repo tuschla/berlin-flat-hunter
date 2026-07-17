@@ -45,7 +45,7 @@ WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 
 # The Telegram bot delivers to Dezső's chat, not the maintainer's. Every alert
 # carries a note (in Italian) asking Dezső to get in touch with Leon.
-DEZSO_NOTE = "📩 Dezsö, se stai leggendo questo messaggio, dovresti contattare Leon."
+DEZSO_NOTE = "📩 Dezső, se stai leggendo questo messaggio, dovresti contattare Leon."
 
 # Profiles to watch: display name -> (schema_monitor.json path, profile yaml).
 PROFILES = {

@@ -89,7 +89,7 @@ class TestHelpers(unittest.TestCase):
         self.assertFalse(wd.send_telegram("token", [], "hi"))
 
     def test_dezso_note_addresses_dezso_and_leon(self):
-        self.assertIn("Dezsö", wd.DEZSO_NOTE)
+        self.assertIn("Dezső", wd.DEZSO_NOTE)
         self.assertIn("Leon", wd.DEZSO_NOTE)
 
     def test_prompt_asks_for_italian_output(self):
