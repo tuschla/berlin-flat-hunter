@@ -43,6 +43,10 @@ CLAUDE_TIMEOUT = int(os.environ.get("BFH_CLAUDE_TIMEOUT", str(20 * 60)))  # seco
 RETRIGGER_COOLDOWN = int(os.environ.get("BFH_RETRIGGER_COOLDOWN", str(24 * 3600)))
 WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 
+# The Telegram bot delivers to Dezső's chat, not the maintainer's. Every alert
+# carries a note (in Italian) asking Dezső to get in touch with Leon.
+DEZSO_NOTE = "📩 Dezsö, se stai leggendo questo messaggio, dovresti contattare Leon."
+
 # Profiles to watch: display name -> (schema_monitor.json path, profile yaml).
 PROFILES = {
     "single": ("data/single/schema_monitor.json", "profiles/single.yaml"),
@@ -153,15 +157,15 @@ Steps:
 {url_lines}
 - Decide which cause it is, with concrete evidence.
 
-Output ONLY a concise Telegram-ready report in PLAIN TEXT, under 350 words, exactly this shape:
+Output ONLY a concise Telegram-ready report, written IN ITALIAN, in PLAIN TEXT, under 350 words, in exactly this shape (keep the Italian field labels):
 
-🔎 {crawler} triage ({profile})
-Cause: <one line — selector / bot-block / empty>
-Evidence: <1-3 short lines>
-Fix: <the single most useful next action; if a code change, name the exact selector/method and the new value; if not fixable in code, say so>
-Command: claude "fix the {crawler} crawler: <specific change>"    (omit this line if no code fix applies)
+🔎 Diagnosi {crawler} ({profile})
+Causa: <una riga — selettore / blocco-bot / sito vuoto>
+Prove: <1-3 righe brevi>
+Soluzione: <l'azione più utile; se è una modifica al codice, indica il selettore/metodo esatto e il nuovo valore; se non è risolvibile via codice, dillo>
+Comando: claude "fix the {crawler} crawler: <modifica specifica>"    (ometti questa riga se non serve una modifica al codice)
 
-No preamble, no markdown headers, nothing else."""
+Write everything in Italian. No preamble, no markdown headers, nothing else. (The `Comando:` line stays in English since it is a command to run verbatim.)"""
 
 
 def run_claude_triage(prompt: str) -> tuple[bool, str]:
@@ -215,21 +219,22 @@ def main() -> int:
             last_success, ago = human_ago(float(health.get("last_success_ts", 0)))
             empty = int(health.get("consecutive_empty", 0))
             token, ids = telegram_creds(profile_path)
-            header = (f"🔴 Watchdog: {crawler} ({profile}) looks down — "
-                      f"{empty} empty crawls, last success {ago} ago. Running Claude triage…")
-            log(header)
+            log(f"{key}: down — {empty} empty crawls, last success {ago} ago; running triage")
 
             if args.dry_run:
                 log(f"DRY-RUN: would Telegram {ids or '[]'} and launch:\n"
                     f"  {CLAUDE_BIN} -p <prompt> --allowedTools {' '.join(CLAUDE_ALLOWED_TOOLS)}")
                 continue
 
-            send_telegram(token, ids, header)
+            header = (f"🔴 Watchdog: il crawler {crawler} ({profile}) sembra non rispondere — "
+                      f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
+                      f"Avvio della diagnosi con Claude…")
+            send_telegram(token, ids, f"{header}\n\n{DEZSO_NOTE}")
             prompt = build_prompt(profile, crawler, health, profile_urls(profile_path))
             ok, report = run_claude_triage(prompt)
-            report = report or "(empty triage output)"
-            prefix = "" if ok else "⚠️ triage incomplete —\n"
-            send_telegram(token, ids, prefix + report[:3500])
+            report = report or "(nessun output dalla diagnosi)"
+            prefix = "" if ok else "⚠️ diagnosi incompleta —\n"
+            send_telegram(token, ids, f"{prefix}{report[:3400]}\n\n{DEZSO_NOTE}")
             log(f"{key}: triage {'ok' if ok else 'FAILED'}, {len(report)} chars sent")
 
             wd_state[key] = {"handled_success_ts": health.get("last_success_ts"),
