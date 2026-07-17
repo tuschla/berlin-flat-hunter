@@ -1,6 +1,7 @@
 """Tests for the local Kleinanzeigen crawler subclass — captures description."""
 import unittest
 
+import requests_mock as req_mock
 from bs4 import BeautifulSoup
 
 from berlin_flat_hunter.crawlers.kleinanzeigen import Kleinanzeigen
@@ -104,6 +105,40 @@ class TestKleinanzeigenCrawler(unittest.TestCase):
         except AttributeError:
             entries = []
         self.assertEqual(entries, [])
+
+    def test_get_page_fetches_via_requests_not_webdriver(self):
+        url = "https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/"
+        html = ('<html><body><div id="srchrslt-adtable">'
+                '<article class="aditem" data-adid="1"></article></div></body></html>')
+        with req_mock.Mocker() as m:
+            m.get(url, text=html)
+            soup = self.crawler.get_page(url)
+        self.assertIsNotNone(soup.find(id="srchrslt-adtable"))
+        # No Chrome driver is ever spun up for the list page.
+        self.assertIsNone(self.crawler.driver)
+
+    def test_get_page_http_error_returns_empty_soup(self):
+        url = "https://www.kleinanzeigen.de/blocked"
+        with req_mock.Mocker() as m:
+            m.get(url, status_code=403)
+            soup = self.crawler.get_page(url)
+        self.assertIsNone(soup.find(id="srchrslt-adtable"))
+        # And extract_data on that empty soup degrades to [] (no AttributeError).
+        self.assertEqual(self.crawler.extract_data(soup), [])
+
+    def test_get_page_retries_once_on_5xx_then_succeeds(self):
+        url = "https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/"
+        html = '<html><body><div id="srchrslt-adtable"></div></body></html>'
+        with req_mock.Mocker() as m:
+            m.get(url, [{"status_code": 502}, {"text": html, "status_code": 200}])
+            soup = self.crawler.get_page(url)
+        self.assertIsNotNone(soup.find(id="srchrslt-adtable"))
+
+    def test_extract_data_without_container_returns_empty(self):
+        """A captcha/block page has no srchrslt-adtable — must yield [], not raise."""
+        soup = BeautifulSoup("<html><body>Ich bin kein Roboter</body></html>",
+                             "html.parser")
+        self.assertEqual(self.crawler.extract_data(soup), [])
 
     def test_extras_by_id_handles_missing_data_adid(self):
         html = ('<html><body><div id="srchrslt-adtable">'
