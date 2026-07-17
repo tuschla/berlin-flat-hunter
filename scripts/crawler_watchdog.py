@@ -60,6 +60,11 @@ PROFILES = {
 # WebFetch (no filesystem access) and file viewing through the Read tool.
 CLAUDE_ALLOWED_TOOLS = [
     "Read", "Grep", "Glob", "WebFetch",
+    # Box-side read-only fetch probe: lets the triage tell a real IP block from a
+    # headless-browser problem. WebFetch egresses via Anthropic, not this host,
+    # so it can't answer "is *our* IP blocked?" — this can. Fixed script, GET +
+    # print only, so allowing arbitrary args after it is safe.
+    "Bash(.venv/bin/python scripts/probe_url.py:*)",
     "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
     "Bash(git status:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(rg:*)",
     "Bash(head:*)", "Bash(wc:*)",
@@ -153,7 +158,10 @@ Diagnose WHY — READ-ONLY. Do not edit files; you have no write tools. The thre
 
 Steps:
 - Read the crawler source: berlin_flat_hunter/crawlers/{crawler.lower()}.py (follow into its flathunter base class if it subclasses one).
-- Fetch the live listing page and compare its structure to the selectors in the code. The profile's target URLs:
+- CRITICAL — is our IP actually blocked? Run the box-side probe (it fetches from THIS host's real egress):
+    .venv/bin/python scripts/probe_url.py <the crawler's target URL>
+  `HTTP 200` with a listing marker (e.g. srchrslt-adtable) → the site serves US fine: it is NOT an IP block, the problem is the browser/driver path or a selector. A captcha/block marker or a non-200 → a real block. Do NOT infer an IP block from a WebFetch timeout: WebFetch egresses via Anthropic's network, not this host, so it cannot tell you whether our crawler's IP is blocked. Trust the probe over WebFetch for that question.
+- Compare the fetched page's structure to the selectors in the code. The profile's target URLs:
 {url_lines}
 - Decide which cause it is, with concrete evidence.
 
