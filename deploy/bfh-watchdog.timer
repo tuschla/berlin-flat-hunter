@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the berlin-flat-hunter crawler watchdog every 15 min
+
+[Timer]
+# First check 5 min after boot (let the crawlers do at least one cycle), then
+# every 15 min. The watchdog de-dups internally, so a persistently-down crawler
+# is re-triaged at most once per BFH_RETRIGGER_COOLDOWN (default 24h), not each tick.
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

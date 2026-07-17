@@ -1,0 +1,16 @@
+[Unit]
+Description=berlin-flat-hunter — crawler watchdog (triage down crawlers via read-only Claude)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/berlin-flat-hunter
+Environment=PYTHONUNBUFFERED=1
+# claude reads its OAuth creds from $HOME/.claude; systemd doesn't set HOME.
+Environment=HOME=/root
+# Read-only triage: reads schema_monitor.json, launches a restricted `claude -p`,
+# pushes the diagnosis to Telegram. Never edits/commits — a human runs the fix.
+ExecStart=/root/berlin-flat-hunter/.venv/bin/python scripts/crawler_watchdog.py
+# One triage run can drive a full Claude investigation; give it room.
+TimeoutStartSec=1500

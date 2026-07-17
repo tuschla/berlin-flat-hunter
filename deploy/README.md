@@ -9,6 +9,7 @@ alternative deploy path we don't take.
 
 - `bfh-single.service` — `profiles/single.yaml` (≤€600, 1 room)
 - `bfh-wg.service`     — `profiles/wg.yaml` (≤€1100, 2 rooms)
+- `bfh-watchdog.service` + `bfh-watchdog.timer` — crawler triage (see below)
 
 Each service runs a `BerlinHunter` loop; both share the same Python venv
 (`.venv/`) but have isolated DBs and schema-monitor state under `data/<profile>/`.
@@ -53,10 +54,34 @@ fires when a crawler returns 0 results for 3 consecutive cycles, or when more
 than 50% of fields are missing — i.e. "the crawler is broken, fix me".
 Routed via `monitoring.alert_notifiers: [telegram]`.
 
+## Crawler watchdog (auto-triage)
+
+When the monitor flags a crawler as down (0 results for 3+ cycles), a timer-driven
+watchdog launches a **read-only** headless Claude Code run to diagnose *why* —
+dead selector, bot-block, or a legitimately empty site — and pushes the diagnosis
+plus a one-command fix to the same Telegram bot. It never edits or commits: a
+human runs the suggested fix. See `scripts/crawler_watchdog.py`.
+
+```bash
+sudo install -m 644 deploy/bfh-watchdog.service deploy/bfh-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now bfh-watchdog.timer
+```
+
+- Runs 5 min after boot, then every 15 min. De-dups to one triage per *down
+  episode*; re-triages a still-broken crawler at most once per 24h
+  (`BFH_RETRIGGER_COOLDOWN`).
+- Manual: `python scripts/crawler_watchdog.py --dry-run` (print, don't act) or
+  `--force` (ignore de-dup). Trigger a real run now: `sudo systemctl start bfh-watchdog.service`.
+- The Claude run is sandboxed via `--allowedTools` (Read/Grep/Glob/WebFetch +
+  read-only Bash) — no Edit/Write/bypass. Tunables via `Environment=` in the
+  unit: `BFH_CLAUDE_TIMEOUT`, `BFH_RETRIGGER_COOLDOWN`, `BFH_CLAUDE_BIN`.
+
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now bfh-single bfh-wg
-sudo rm /etc/systemd/system/bfh-single.service /etc/systemd/system/bfh-wg.service
+sudo systemctl disable --now bfh-single bfh-wg bfh-watchdog.timer
+sudo rm /etc/systemd/system/bfh-single.service /etc/systemd/system/bfh-wg.service \
+        /etc/systemd/system/bfh-watchdog.service /etc/systemd/system/bfh-watchdog.timer
 sudo systemctl daemon-reload
 ```
