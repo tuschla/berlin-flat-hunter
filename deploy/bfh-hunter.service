@@ -1,0 +1,26 @@
+[Unit]
+Description=berlin-flat-hunter — shared-scrape hunter (all profiles, one crawl per cycle)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/berlin-flat-hunter
+# Unbuffered stdout so journalctl shows progress in real time (default CPython
+# stdout is block-buffered when not a tty, which makes a crawl loop look hung).
+Environment=PYTHONUNBUFFERED=1
+# One process: crawls every source once per cycle and fans the results out to
+# every profile listed in hunter.yaml. Replaces the old per-profile services
+# (bfh-single / bfh-wg), which each ran a full duplicate crawl.
+ExecStart=/root/.local/bin/uv run python main.py --hunter hunter.yaml
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=60
+# Cold start patches undetected-chromedriver + warms Chrome for the Selenium
+# crawlers/appliers; give it room before systemd calls the start a failure.
+TimeoutStartSec=180
+# Containerised host: no User=, no namespace-touching hardening (they fight
+# rootless container restrictions).
+
+[Install]
+WantedBy=multi-user.target

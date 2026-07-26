@@ -2,6 +2,7 @@
 from flathunter.config import YamlConfig
 from flathunter.crawler.kleinanzeigen import Kleinanzeigen as _UpstreamKleinanzeigen
 
+from berlin_flat_hunter.crawlers.degewo import Degewo
 from berlin_flat_hunter.crawlers.gesobau import Gesobau
 from berlin_flat_hunter.crawlers.gewobag import Gewobag
 from berlin_flat_hunter.crawlers.howoge import Howoge
@@ -19,7 +20,7 @@ class BerlinConfig(YamlConfig):
         upstream = self.searchers()
         replaced = [Kleinanzeigen(self) if isinstance(s, _UpstreamKleinanzeigen) else s
                     for s in upstream]
-        extra = [Gewobag(self), Wbm(self), Gesobau(self), Howoge(self)]
+        extra = [Gewobag(self), Wbm(self), Gesobau(self), Howoge(self), Degewo(self)]
         self.set_searchers(replaced + extra)
 
     def ollama_enabled(self) -> bool:
@@ -74,3 +75,48 @@ class BerlinConfig(YamlConfig):
 
     def scam_filter_config(self) -> dict:
         return self.config.get("scam_filter", {}) or {}
+
+    # ------------------------------------------------------------------
+    # Per-source auto-apply mode. The legacy switch was a single
+    # ``auto_apply.dry_run`` bool; now each source may declare its own mode
+    # under ``auto_apply.send_modes`` while ``dry_run`` remains the fallback so
+    # existing configs keep working unchanged.
+    # ------------------------------------------------------------------
+    def send_mode_for(self, source: str) -> str:
+        """Return "off" | "dry_run" | "live" for ``source`` (crawler name).
+
+        Precedence: an explicit per-source entry in ``auto_apply.send_modes``
+        (case-insensitive on the source name) wins; otherwise fall back to the
+        global mode implied by ``auto_apply.enabled`` + ``auto_apply.dry_run``.
+        """
+        cfg = self.config.get("auto_apply", {}) or {}
+        modes = cfg.get("send_modes", {}) or {}
+        # case-insensitive source lookup (config may key by "howoge" or "Howoge")
+        for key, val in modes.items():
+            if str(key).lower() == str(source).lower():
+                mode = str(val).lower()
+                return mode if mode in ("off", "dry_run", "live") else "off"
+        if not cfg.get("enabled", False):
+            return "off"
+        return "dry_run" if cfg.get("dry_run", True) else "live"
+
+    def email_alias_config(self) -> dict:
+        return self.config.get("email_alias", {}) or {}
+
+    def email_imap_config(self) -> dict:
+        return self.config.get("email_imap", {}) or {}
+
+    def form_answers(self) -> dict:
+        """Answers to the unified application questionnaire (form_catalog keys)."""
+        raw = self.config.get("form_answers", {}) or {}
+        return {str(k): str(v) for k, v in raw.items()}
+
+    def state_db_path(self) -> str:
+        """Per-profile SQLite for alias/send/imap dedup state. Defaults next to
+        the main DB (alongside stats.db / schema_monitor.json)."""
+        configured = self.config.get("state_db_path", "")
+        if configured:
+            return configured
+        import os
+        state_dir = os.path.dirname(self.database_location()) or "."
+        return os.path.join(state_dir, "state.db")

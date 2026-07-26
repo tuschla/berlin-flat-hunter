@@ -47,11 +47,10 @@ WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 # carries a note (in Italian) asking Dezső to get in touch with Leon.
 DEZSO_NOTE = "📩 Dezső, se stai leggendo questo messaggio, dovresti contattare Leon."
 
-# Profiles to watch: display name -> (schema_monitor.json path, profile yaml).
-PROFILES = {
-    "single": ("data/single/schema_monitor.json", "profiles/single.yaml"),
-    "wg": ("data/wg/schema_monitor.json", "profiles/wg.yaml"),
-}
+# Shared-scrape deployment: ONE process crawls every source once per cycle, so
+# there is ONE schema monitor (not one per profile) and crawler-down alerts go
+# to the shared channel configured in hunter.yaml's `global.telegram`.
+HUNTER_YAML = os.path.join(REPO_DIR, "hunter.yaml")
 
 # Read-only tool sandbox for the triage run. No Edit/Write/bypass — everything
 # not listed is auto-denied in headless mode, so the run can only investigate.
@@ -99,17 +98,44 @@ def down_crawlers(state: dict) -> list[tuple[str, dict]]:
     return out
 
 
-def telegram_creds(profile_path: str) -> tuple[str, list[str]]:
-    cfg = yaml.safe_load(open(_abs(profile_path))) or {}
-    tg = cfg.get("telegram") or {}
+def _load_hunter_cfg() -> dict:
+    try:
+        return yaml.safe_load(open(HUNTER_YAML)) or {}
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def shared_monitor_path(hunter_cfg: dict | None = None) -> str:
+    """Path to the single shared schema_monitor.json (next to the shared
+    crawl DB configured in hunter.yaml's global.database_location)."""
+    cfg = hunter_cfg if hunter_cfg is not None else _load_hunter_cfg()
+    db = (cfg.get("global", {}) or {}).get("database_location", "")
+    state_dir = os.path.dirname(db) if db else os.path.join(REPO_DIR, "data")
+    return os.path.join(state_dir, "schema_monitor.json")
+
+
+def hunter_telegram_and_urls(hunter_cfg: dict | None = None) -> tuple[str, list[str], list[str]]:
+    """Shared alert channel + the union of all crawled URLs, from hunter.yaml.
+
+    Alerts for the shared crawl go to ``global.telegram``. URLs are the global
+    extras plus every profile's ``urls`` (deduped), so the triage prompt can list
+    the down crawler's real target URL.
+    """
+    cfg = hunter_cfg if hunter_cfg is not None else _load_hunter_cfg()
+    g = cfg.get("global", {}) or {}
+    tg = g.get("telegram", {}) or {}
     token = tg.get("bot_token") or ""
-    ids = tg.get("receiver_ids") or []
-    return token, [str(i) for i in ids]
-
-
-def profile_urls(profile_path: str) -> list[str]:
-    cfg = yaml.safe_load(open(_abs(profile_path))) or {}
-    return list(cfg.get("urls") or [])
+    ids = [str(i) for i in (tg.get("receiver_ids") or [])]
+    urls = list(g.get("urls") or [])
+    for p in cfg.get("profiles", []) or []:
+        try:
+            pc = yaml.safe_load(open(_abs(p))) or {}
+            urls += list(pc.get("urls") or [])
+        except (FileNotFoundError, ValueError):
+            continue
+    seen: set[str] = set()
+    urls = [u for u in urls if not (u in seen or seen.add(u))]
+    return token, ids, urls
 
 
 def send_telegram(token: str, ids: list[str], text: str) -> bool:
@@ -216,37 +242,38 @@ def main() -> int:
     now = time.time()
     any_down = False
 
-    for profile, (state_path, profile_path) in PROFILES.items():
-        state = load_json(state_path)
-        for crawler, health in down_crawlers(state):
-            any_down = True
-            key = f"{profile}:{crawler}"
-            if not should_trigger(wd_state, key, health, now, args.force):
-                log(f"{key}: down but already triaged this episode — skipping")
-                continue
-            last_success, ago = human_ago(float(health.get("last_success_ts", 0)))
-            empty = int(health.get("consecutive_empty", 0))
-            token, ids = telegram_creds(profile_path)
-            log(f"{key}: down — {empty} empty crawls, last success {ago} ago; running triage")
+    hunter_cfg = _load_hunter_cfg()
+    token, ids, urls = hunter_telegram_and_urls(hunter_cfg)
+    state = load_json(shared_monitor_path(hunter_cfg))
 
-            if args.dry_run:
-                log(f"DRY-RUN: would Telegram {ids or '[]'} and launch:\n"
-                    f"  {CLAUDE_BIN} -p <prompt> --allowedTools {' '.join(CLAUDE_ALLOWED_TOOLS)}")
-                continue
+    for crawler, health in down_crawlers(state):
+        any_down = True
+        key = f"shared:{crawler}"
+        if not should_trigger(wd_state, key, health, now, args.force):
+            log(f"{key}: down but already triaged this episode — skipping")
+            continue
+        last_success, ago = human_ago(float(health.get("last_success_ts", 0)))
+        empty = int(health.get("consecutive_empty", 0))
+        log(f"{key}: down — {empty} empty crawls, last success {ago} ago; running triage")
 
-            header = (f"🔴 Watchdog: il crawler {crawler} ({profile}) sembra non rispondere — "
-                      f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
-                      f"Avvio della diagnosi con Claude…")
-            send_telegram(token, ids, f"{header}\n\n{DEZSO_NOTE}")
-            prompt = build_prompt(profile, crawler, health, profile_urls(profile_path))
-            ok, report = run_claude_triage(prompt)
-            report = report or "(nessun output dalla diagnosi)"
-            prefix = "" if ok else "⚠️ diagnosi incompleta —\n"
-            send_telegram(token, ids, f"{prefix}{report[:3400]}\n\n{DEZSO_NOTE}")
-            log(f"{key}: triage {'ok' if ok else 'FAILED'}, {len(report)} chars sent")
+        if args.dry_run:
+            log(f"DRY-RUN: would Telegram {ids or '[]'} and launch:\n"
+                f"  {CLAUDE_BIN} -p <prompt> --allowedTools {' '.join(CLAUDE_ALLOWED_TOOLS)}")
+            continue
 
-            wd_state[key] = {"handled_success_ts": health.get("last_success_ts"),
-                             "trigger_ts": now, "last_ok": ok}
+        header = (f"🔴 Watchdog: il crawler {crawler} sembra non rispondere — "
+                  f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
+                  f"Avvio della diagnosi con Claude…")
+        send_telegram(token, ids, f"{header}\n\n{DEZSO_NOTE}")
+        prompt = build_prompt("shared", crawler, health, urls)
+        ok, report = run_claude_triage(prompt)
+        report = report or "(nessun output dalla diagnosi)"
+        prefix = "" if ok else "⚠️ diagnosi incompleta —\n"
+        send_telegram(token, ids, f"{prefix}{report[:3400]}\n\n{DEZSO_NOTE}")
+        log(f"{key}: triage {'ok' if ok else 'FAILED'}, {len(report)} chars sent")
+
+        wd_state[key] = {"handled_success_ts": health.get("last_success_ts"),
+                         "trigger_ts": now, "last_ok": ok}
 
     if not args.dry_run:
         os.makedirs(os.path.dirname(WATCHDOG_STATE), exist_ok=True)
