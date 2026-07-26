@@ -36,6 +36,7 @@ behaves exactly like today's single-bot notifier.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
@@ -43,6 +44,13 @@ import requests
 from flathunter.abstract_processor import Processor
 
 log = logging.getLogger(__name__)
+
+# Retry transient Telegram failures so a 429/5xx/timeout doesn't permanently
+# drop a matched listing (the expose is already marked "seen" upstream, so a
+# lost send is never retried on a later cycle).
+_SEND_ATTEMPTS = 3
+_BACKOFF_SECONDS = (1.0, 3.0)   # waited before attempts 2 and 3
+_RETRY_AFTER_CAP = 30.0         # cap a 429 Retry-After so we never block a cycle for minutes
 
 
 class TelegramNotifier:
@@ -95,18 +103,47 @@ class TelegramNotifier:
                 }
                 if parse_mode:
                     payload["parse_mode"] = parse_mode
-                try:
-                    r = requests.post(url, data=payload, timeout=self.timeout)
-                except Exception as exc:  # noqa: BLE001 - never raise to caller
-                    log.error("Telegram send error: %s", exc)
-                    ok = False
-                    continue
-                if r.status_code != 200:
-                    log.error(
-                        "Telegram send failed (%s): %s", r.status_code, r.text
-                    )
+                if not self._post_with_retry(url, payload):
                     ok = False
         return ok
+
+    def _post_with_retry(self, url: str, payload: dict) -> bool:
+        """POST one chunk, retrying transient failures (network / 429 / 5xx).
+        Returns True on a 200, False after exhausting attempts. Never raises."""
+        for attempt in range(_SEND_ATTEMPTS):
+            last = attempt == _SEND_ATTEMPTS - 1
+            try:
+                r = requests.post(url, data=payload, timeout=self.timeout)
+            except Exception as exc:  # noqa: BLE001 - never raise to caller
+                log.warning("Telegram send error (attempt %d/%d): %s",
+                            attempt + 1, _SEND_ATTEMPTS, exc)
+                if last:
+                    return False
+                time.sleep(_BACKOFF_SECONDS[attempt])
+                continue
+            if r.status_code == 200:
+                return True
+            if r.status_code == 429 and not last:
+                time.sleep(self._retry_after(r, _BACKOFF_SECONDS[attempt]))
+                continue
+            if 500 <= r.status_code < 600 and not last:
+                log.warning("Telegram %s (attempt %d/%d), retrying",
+                            r.status_code, attempt + 1, _SEND_ATTEMPTS)
+                time.sleep(_BACKOFF_SECONDS[attempt])
+                continue
+            log.error("Telegram send failed (%s): %s", r.status_code, r.text)
+            return False
+        return False
+
+    @staticmethod
+    def _retry_after(resp, fallback: float) -> float:
+        """Seconds to wait for a 429, from Telegram's parameters.retry_after
+        (capped), else the backoff fallback."""
+        try:
+            ra = float(resp.json().get("parameters", {}).get("retry_after", 0))
+        except Exception:  # noqa: BLE001
+            ra = 0.0
+        return min(ra, _RETRY_AFTER_CAP) if ra > 0 else fallback
 
     def _chunks(self, text: str) -> List[str]:
         if len(text) <= self.MAX_LEN:
@@ -114,6 +151,14 @@ class TelegramNotifier:
         out: List[str] = []
         buf = ""
         for line in text.splitlines(keepends=True):
+            # A single line longer than the cap must be hard-split, else it would
+            # be emitted as an over-cap chunk that Telegram rejects with a 400.
+            while len(line) > self.MAX_LEN:
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(line[:self.MAX_LEN])
+                line = line[self.MAX_LEN:]
             if len(buf) + len(line) > self.MAX_LEN:
                 if buf:
                     out.append(buf)

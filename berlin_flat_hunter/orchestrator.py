@@ -35,7 +35,7 @@ from flathunter.idmaintainer import IdMaintainer
 from flathunter.logging import logger
 
 from berlin_flat_hunter.config import BerlinConfig
-from berlin_flat_hunter.hunter import BerlinHunter
+from berlin_flat_hunter.hunter import BerlinHunter, _coerce_expose_id
 from berlin_flat_hunter.notify import TelegramNotifier
 
 
@@ -200,8 +200,23 @@ class Orchestrator:
 
     def run_once(self, max_pages=None) -> None:
         """One cycle: shared crawl → health → per-profile fan-out."""
-        raw = self._dedup(list(self.lead.crawl_for_exposes(max_pages)))
-        self.lead._record_health(raw)  # one schema-monitor tick for the shared crawl
+        try:
+            raw = self._dedup(list(self.lead.crawl_for_exposes(max_pages)))
+            # Coerce ids once up front so the shared general-data log and every
+            # profile key string-id crawlers (Gewobag/degewo) identically.
+            for expose in raw:
+                _coerce_expose_id(expose)
+            self.lead._record_health(raw)  # one schema-monitor tick for the shared crawl
+        except Exception:  # noqa: BLE001 — a wholesale crawl failure must still alert
+            logger.error("Shared crawl aborted before health could be recorded:\n%s",
+                         traceback.format_exc())
+            try:
+                # Force-tick every crawler empty so the watchdog's down-alerts fire
+                # even when the crawl blew up entirely (the failure mode they exist for).
+                self.lead._record_total_failure()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("record_total_failure failed: %s", exc)
+            return
         if self._stats is not None:
             for expose in raw:
                 try:
