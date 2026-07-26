@@ -37,6 +37,15 @@ global:
   notifiers:
     - telegram
 
+  # General-data log: ONE shared SQLite recording every listing the shared crawl
+  # sees (url/title/price/rooms/size/warm+cold/first+last seen). This is the
+  # only "logging" DB — each profile's data/<name>/db.sqlite is flathunter's
+  # per-profile "already seen" dedup state (operational, not a log), so keep
+  # per-profile `statistics:` off. On by default; set enabled: false to disable.
+  statistics:
+    enabled: true
+    # db_path: /root/berlin-flat-hunter/data/stats.db   # defaults next to database_location
+
   # Shared alert channel (crawler-down / schema-change). Per-listing
   # notifications still use each profile's own telegram config.
   # NOTE: crawler-down alerts are ALSO fanned out to every profile's own

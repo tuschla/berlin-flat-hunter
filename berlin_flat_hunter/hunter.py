@@ -3,6 +3,7 @@ and schema change monitoring."""
 import os
 import time
 import traceback
+import zlib
 
 import requests.exceptions
 import urllib3.exceptions
@@ -34,6 +35,27 @@ _EXTRA_NOTIFIERS = {
 # Idle heartbeat cadence: on cycles with no activity, ping the log channel at
 # most this often so it proves the bot is alive without spamming.
 _HEARTBEAT_IDLE_INTERVAL = 3600.0
+
+
+def _coerce_expose_id(expose: dict) -> None:
+    """Ensure ``expose['id']`` is int-coercible in place.
+
+    flathunter's ``IdMaintainer.save_expose`` does ``int(expose['id'])`` and
+    raises on anything non-numeric — which crashes the whole process chain
+    mid-stream. Several crawlers legitimately carry string ids (Gewobag's
+    openimmo object number like ``W1300.42303.0131-0504``, degewo's URL slug),
+    so map any non-numeric id to a stable non-negative int (crc32 of the string,
+    or the URL as a last resort). Stable input → stable id, so cross-cycle
+    "already seen" dedup is preserved.
+    """
+    raw = expose.get("id")
+    try:
+        int(raw)
+        return
+    except (TypeError, ValueError):
+        pass
+    basis = str(raw) if raw not in (None, "") else str(expose.get("url", ""))
+    expose["id"] = zlib.crc32(basis.encode("utf-8"))
 
 _NOTIFIER_BUILDERS = {
     "apprise": SenderApprise,
@@ -304,6 +326,12 @@ class BerlinHunter(Hunter):
         property of the shared crawl, recorded once by whoever crawled, not
         re-ticked per profile.
         """
+        # Normalise ids so flathunter's int(id) in save_expose can't crash the
+        # chain on a string-id crawler (Gewobag/degewo). Idempotent, so running
+        # it per profile on the shared pool is harmless.
+        for expose in raw_exposes:
+            _coerce_expose_id(expose)
+
         filter_set = Filter.builder() \
                            .read_config(self.config) \
                            .filter_already_seen(self.id_watch) \

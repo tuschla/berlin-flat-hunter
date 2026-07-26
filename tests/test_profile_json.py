@@ -31,14 +31,14 @@ def cfg(overrides=None):
     d = dict(BASE)
     if overrides:
         d = {**d, **overrides}
-    return userprofile_to_config(d, name="jakob", data_dir="/data")
+    return userprofile_to_config(d, name="testuser", data_dir="/data")
 
 
 def test_applicant_and_db_and_urls():
     c = cfg()
     assert c["applicant"]["name"] == "Max Mustermann"
     assert c["applicant"]["postal_code"] == "10435"      # zip_code -> postal_code
-    assert c["database_location"] == "/data/jakob/db.sqlite"
+    assert c["database_location"] == "/data/testuser/db.sqlite"
     # Only enabled known sources contribute URLs (wbm disabled).
     assert "https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/wohnung/" in c["urls"]
     assert "https://www.degewo.de/immosuche/" in c["urls"]
