@@ -19,7 +19,7 @@ from flathunter.webdriver_crawler import WebdriverCrawler
 from berlin_flat_hunter.applicator import AutoApplicator
 from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
-from berlin_flat_hunter.notify import BerlinNotifier
+from berlin_flat_hunter.notify import BerlinNotifier, TelegramNotifier
 from berlin_flat_hunter.ollama_filter import OllamaFilter
 from berlin_flat_hunter.stats import StatsLogger, StatsProcessor
 
@@ -116,8 +116,24 @@ class BerlinHunter(Hunter):
                 except Exception as exc:
                     logger.warning("SchemaMonitor: could not build %s notifier: %s", name, exc)
 
+        # Per-profile identity + optional state DB for addy alias caching and
+        # IMAP dedup. profile_name doubles as the Store user_id.
+        self.profile_name = os.path.basename(state_dir) or "default"
+        alias_cfg = config.email_alias_config() if hasattr(config, "email_alias_config") else {}
+        self._imap_cfg = config.email_imap_config() if hasattr(config, "email_imap_config") else {}
+        self._store = None
+        self._alias_resolver = None
+        if (alias_cfg.get("provider", "none") != "none") or self._imap_cfg.get("enabled"):
+            from berlin_flat_hunter.store import Store
+            self._store = Store(config.state_db_path())
+        if alias_cfg.get("provider", "none") == "addy":
+            from berlin_flat_hunter.email_alias.resolver import AliasResolver
+            self._alias_resolver = AliasResolver(alias_cfg, self._store, self.profile_name)
+
         self._auto_applicator = (
-            AutoApplicator(config, alert_dispatch=self._dispatch_alerts)
+            AutoApplicator(config, alert_dispatch=self._dispatch_alerts,
+                           store=self._store, alias_resolver=self._alias_resolver,
+                           user_id=self.profile_name)
             if config.auto_apply_enabled() else None
         )
 
@@ -327,8 +343,57 @@ class BerlinHunter(Hunter):
             logger.info("New offer: %s", expose["title"])
             result.append(expose)
 
+        self._run_imap_confirm()
         self._maybe_heartbeat(len(result))
         return result
+
+    def _run_imap_confirm(self) -> None:
+        """Auto-confirm Genossenschaft double-opt-in links and alert on landlord
+        replies. No-op unless this profile configured IMAP."""
+        cfg = self._imap_cfg
+        if not cfg.get("enabled"):
+            return
+        from berlin_flat_hunter.email_confirm.imap_reader import ImapConfirmer
+        uid = self.profile_name
+        store = self._store
+        try:
+            confirmer = ImapConfirmer(
+                cfg,
+                is_confirmed=((lambda url: store.was_imap_confirmed(uid, url)) if store else None),
+                record_confirmation=(
+                    (lambda subject, url, ok: store.record_imap_confirmation(uid, subject, url)
+                     if (ok and store) else None) if store else None),
+            )
+            confirmations, replies = confirmer.scan()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("IMAP scan failed for %s: %s", uid, exc)
+            return
+        for subject, url, ok in confirmations:
+            logger.info("IMAP[%s] confirm %s (%s) -> %s", uid, subject, url, ok)
+        self._notify_replies(replies)
+
+    def _notify_replies(self, replies: list) -> None:
+        """Telegram-alert each new landlord reply (deduped by Message-ID via Store)."""
+        if not replies:
+            return
+        uid = self.profile_name
+        store = self._store
+        notifier = TelegramNotifier(
+            self.config.telegram_bot_token() or "",
+            [str(i) for i in (self.config.telegram_receiver_ids() or [])],
+        )
+        for mid, sender, subject, snippet in replies:
+            if store and store.was_email_notified(uid, mid):
+                continue
+            text = (f"📬 Antwort vom Vermieter\n\nVon: {sender}\nBetreff: {subject}\n\n{snippet}")
+            if notifier.enabled:
+                if not notifier.send(text):
+                    continue  # send failed — retry next cycle (don't record)
+                logger.info("IMAP[%s] reply alert sent: %s", uid, subject)
+            else:
+                logger.info("IMAP[%s] reply (telegram off): %s", uid, subject)
+            if store:
+                store.record_email_notification(uid, mid)
 
     def _maybe_heartbeat(self, new_count: int) -> None:
         """Post a per-cycle heartbeat to the optional log channel. Always fires
@@ -431,3 +496,9 @@ class BerlinHunter(Hunter):
                 stats.close()
             except Exception as exc:
                 logger.warning("Stats close failed: %s", exc)
+        store = getattr(self, "_store", None)
+        if store is not None:
+            try:
+                store.close()
+            except Exception as exc:
+                logger.warning("Store close failed: %s", exc)

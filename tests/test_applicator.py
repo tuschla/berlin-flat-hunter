@@ -331,14 +331,17 @@ class TestAutoApplicator(unittest.TestCase):
         self.assertTrue(any("apply raised" in line and "driver wedged" in line
                             for line in cm.output))
 
-    def test_later_applicator_tried_after_earlier_fails(self):
-        m0 = self.processor.applicators[0].apply = MagicMock(return_value=False)
-        m1 = self.processor.applicators[1].apply = MagicMock(return_value=True)
-        self.processor.applicators[2].apply = MagicMock(return_value=False)
-        self.processor.applicators[3].apply = MagicMock(return_value=False)
+    def test_only_url_owner_applicator_is_called(self):
+        # Dispatch goes straight to the applicator whose URL_MATCH owns the
+        # listing host (URL_MATCH values are disjoint), not a try-each fallback.
+        mocks = [MagicMock(return_value=False) for _ in self.processor.applicators]
+        for app, mock in zip(self.processor.applicators, mocks):
+            app.apply = mock
+        mocks[1].return_value = True  # applicators[1] is WbmApplicator (wbm.de)
         self.processor.process_expose(dict(WBM_EXPOSE))
-        m0.assert_called_once()
-        m1.assert_called_once()
+        mocks[1].assert_called_once()
+        for i in (0, 2, 3):
+            mocks[i].assert_not_called()
 
 
 class TestStaleApplicatorAlerts(unittest.TestCase):

@@ -766,14 +766,23 @@ class AutoApplicator(Processor):
     so the failure surfaces beyond a debug log. Counter resets on the next success.
     """
 
-    def __init__(self, config, alert_dispatch: Optional[Callable[[list[str]], None]] = None):
+    def __init__(self, config, alert_dispatch: Optional[Callable[[list[str]], None]] = None,
+                 store=None, alias_resolver=None, user_id: str = "default"):
         self.config = config
         applicant = config.applicant_config() if hasattr(config, "applicant_config") else {}
+        # Base applicant data; the recipient email is swapped per-alias when an
+        # AliasResolver yields more than one address for a landlord.
+        self._base_applicant = dict(applicant)
         apply_cfg = getattr(config, "config", {}).get("auto_apply", {})
         dry_run = bool(apply_cfg.get("dry_run", False))
         # Fallback when the config predates per-source modes (e.g. a plain
         # YamlConfig in tests): the legacy single dry_run flag.
         self._default_dry_run = dry_run
+        # Optional per-profile Store (send dedup) + AliasResolver (addy.io
+        # multi-email). Both None => classic single-application behaviour.
+        self._store = store
+        self._alias_resolver = alias_resolver
+        self._user_id = user_id
         # Profile-dir resolution: explicit config wins, env var second
         # (docker compose convention), empty string disables the feature.
         profile_dir = (apply_cfg.get("chrome_profile_dir", "")
@@ -805,46 +814,89 @@ class AutoApplicator(Processor):
             mode = "dry_run" if self._default_dry_run else "live"
         if mode == "off":
             return expose
-        for applicator in self.applicators:
-            applicator.dry_run = (mode != "live")
-
         if self.gate is not None and not self.gate.should_apply(expose):
             logger.info("Ollama gate: skipping application for %s", expose.get("url"))
             return expose
         url = expose.get("url", "") or ""
-        for applicator in self.applicators:
-            url_match = getattr(applicator, "URL_MATCH", "")
-            is_target = bool(url_match) and url_match in url
+        applicator = self._match(url)
+        if applicator is None:
+            return expose  # no site owns this URL (e.g. degewo/gesobau: notify-only)
+        applicator.dry_run = (mode != "live")
+
+        # One application PER selected email (real + any addy aliases). Without
+        # an AliasResolver this is just the applicant's own email — the classic
+        # single application. Store dedups per (listing, recipient) so a second
+        # email isn't re-sent every cycle.
+        key = self._listing_key(expose, crawler)
+        for email in self._emails(crawler, key):
+            if self._already_sent(key, email, mode):
+                continue
+            applicator.applicant = ({**self._base_applicant, "email": email}
+                                    if email else self._base_applicant)
             try:
                 ok = bool(applicator.apply(expose))
             except ManualApplyRequired as exc:
-                # Site demands human (reCAPTCHA, missing creds, etc.) — push
-                # a per-listing alert through the notifier chain so the user
-                # gets a telegram/etc. ping with the listing URL to apply by
-                # hand. Counts as a "soft" failure: don't increment the stale-
-                # selector counter (the code is fine, the *site* requires a
-                # human), and stop trying sibling applicators since URL_MATCH
-                # already identified the right one.
+                # Site demands a human (reCAPTCHA, missing creds, …) — push a
+                # per-listing alert so the user gets a ping with the URL to apply
+                # by hand. Soft failure: don't tick the stale-selector counter.
                 self._notify_manual_apply(applicator, expose, exc.reason)
                 expose["manual_apply_required"] = True
+                self._record_send(key, email, mode, applicator, ok=False,
+                                  message=f"manual apply required: {exc.reason}")
                 break
             except Exception as exc:
                 site = getattr(applicator, "SITE_NAME", type(applicator).__name__)
                 logger.warning("%s apply raised: %s", site, exc)
                 ok = False
+            self._record_send(key, email, mode, applicator, ok=ok)
             if ok:
                 expose["applied"] = True
-                if is_target:
-                    self._record_success(applicator)
-                break
-            if is_target:
-                # Only one applicator can own a given URL (URL_MATCH values are
-                # disjoint per host) — once we know which site this URL belongs
-                # to and it failed, don't keep calling sibling applicators that
-                # would all just no-op via their own URL_MATCH guards.
+                self._record_success(applicator)
+            else:
                 self._record_failure(applicator, url)
-                break
         return expose
+
+    def _match(self, url: str):
+        """The single applicator whose URL_MATCH owns this URL (disjoint hosts)."""
+        for applicator in self.applicators:
+            url_match = getattr(applicator, "URL_MATCH", "")
+            if url_match and url_match in url:
+                return applicator
+        return None
+
+    @staticmethod
+    def _listing_key(expose: dict, crawler: str) -> str:
+        return f"{crawler or 'x'}:{expose.get('id', '')}"
+
+    def _emails(self, source: str, listing_key: str) -> list[str]:
+        base = self._base_applicant.get("email", "")
+        if self._alias_resolver is not None:
+            try:
+                emails = self._alias_resolver.emails_for(source, base, listing_key)
+                if emails:
+                    return emails
+            except Exception as exc:  # noqa: BLE001 — never let alias minting block an apply
+                logger.warning("AliasResolver failed for %s: %s", source, exc)
+        return [base] if base else [""]
+
+    def _already_sent(self, listing_key: str, email: str, mode: str) -> bool:
+        if self._store is None:
+            return False
+        if mode == "live":
+            return self._store.has_live_send(self._user_id, listing_key, email)
+        return self._store.has_send(self._user_id, listing_key, mode, email)
+
+    def _record_send(self, listing_key: str, email: str, mode: str, applicator,
+                     ok: bool, message: str = "") -> None:
+        if self._store is None:
+            return
+        site = getattr(applicator, "SITE_NAME", type(applicator).__name__).lower()
+        try:
+            self._store.record_send(self._user_id, listing_key, mode=mode,
+                                    channel=f"{site}-form", ok=ok, message=message,
+                                    recipient=email or "")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("store.record_send failed: %s", exc)
 
     def _notify_manual_apply(self, applicator, expose: dict, reason: str):
         """Format a per-listing manual-apply notice and push it through the
