@@ -38,6 +38,17 @@ def test_addy_mints_and_caches_per_source(tmp_path, monkeypatch):
     assert calls["n"] == 1
 
 
+def test_provider_emails_case_insensitive_source(tmp_path):
+    # Crawler names arrive capitalised (Howoge/Gewobag/Wbm) but provider_emails
+    # is keyed lowercase — the alias pool must still be found.
+    store = Store(str(tmp_path / "s.db"))
+    r = AliasResolver({"provider": "addy", "addy_api_key": "",
+                       "provider_emails": {"howoge": ["a@x.de", "b@x.de"]}}, store, "jakob")
+    assert r.emails_for("Howoge", "real@x.de", "k") == ["a@x.de", "b@x.de"]
+    assert r.emails_for("HOWOGE", "real@x.de", "k") == ["a@x.de", "b@x.de"]
+    assert r.emails_for("howoge", "real@x.de", "k") == ["a@x.de", "b@x.de"]
+
+
 def test_addy_failure_degrades_to_real(tmp_path, monkeypatch):
     store = Store(str(tmp_path / "s.db"))
     r = AliasResolver({"provider": "addy", "addy_api_key": "key"}, store, "single")
