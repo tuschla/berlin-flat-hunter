@@ -54,10 +54,22 @@ class AliasResolver:
 
     # ------------------------------------------------------------------
     def _chosen(self, source: str) -> list[str]:
-        """Explicitly selected addresses for this landlord (deduped, order-kept)."""
-        raw = (self.cfg.get("provider_emails") or {}).get(source, [])
+        """Explicitly selected addresses for this landlord (deduped, order-kept).
+
+        Crawler names arrive capitalised (``Howoge``/``Gewobag``/``Wbm``) while
+        ``provider_emails`` is keyed by lowercase source name — match
+        case-insensitively so the configured alias pool is actually used."""
+        pe = self.cfg.get("provider_emails") or {}
+        raw = pe.get(source)
+        if raw is None:
+            low = source.lower()
+            for k, v in pe.items():
+                if str(k).lower() == low:
+                    raw = v
+                    break
         if isinstance(raw, str):
             raw = [raw]
+        raw = raw or []
         seen: set[str] = set()
         return [e for e in raw if e and not (e in seen or seen.add(e))]
 
@@ -66,7 +78,7 @@ class AliasResolver:
             return f"listing:{listing_key}"
         if self.granularity == "fixed":
             return "fixed"
-        return f"source:{source}"
+        return f"source:{source.lower()}"
 
     def _alias_for(self, source: str, listing_key: str) -> str:
         """Cached or freshly-minted addy alias for the granularity bucket."""
