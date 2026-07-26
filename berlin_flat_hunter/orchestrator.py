@@ -43,16 +43,24 @@ def _resolve(path: str, base_dir: str) -> str:
     return path if os.path.isabs(path) else os.path.normpath(os.path.join(base_dir, path))
 
 
-def _load_profile_hunter(path: str) -> tuple[str, BerlinHunter]:
-    """Build one (name, BerlinHunter) from a profile YAML. The name is the
-    profile file's basename without extension (e.g. ``single``)."""
-    with open(path) as f:
-        raw = yaml.safe_load(f) or {}
+def _load_profile_hunter(path: str, data_dir: str) -> tuple[str, BerlinHunter]:
+    """Build one (name, BerlinHunter) from a profile file. The name is the file's
+    basename without extension (e.g. ``single``). A ``.json`` file is read as a
+    pi-style UserProfile and adapted; anything else is flathunter YAML."""
+    name = os.path.splitext(os.path.basename(path))[0]
+    if path.lower().endswith(".json"):
+        from berlin_flat_hunter.profile_json import load_profile_json
+        raw = load_profile_json(path, name=name, data_dir=data_dir)
+    else:
+        with open(path) as f:
+            raw = yaml.safe_load(f) or {}
     config = BerlinConfig(raw)
     config.init_searchers()
+    db_dir = os.path.dirname(config.database_location())
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     id_watch = IdMaintainer(config.database_location())
     hunter = BerlinHunter(config, id_watch)
-    name = os.path.splitext(os.path.basename(path))[0]
     return name, hunter
 
 
@@ -71,8 +79,9 @@ class Orchestrator:
         profile_paths = hunter_cfg.get("profiles", []) or []
         if not profile_paths:
             raise ValueError("hunter.yaml lists no profiles under `profiles:`")
+        data_dir = os.path.join(base_dir, "data")
         self.profiles: list[tuple[str, BerlinHunter]] = [
-            _load_profile_hunter(_resolve(p, base_dir)) for p in profile_paths
+            _load_profile_hunter(_resolve(p, base_dir), data_dir) for p in profile_paths
         ]
         logger.info("Orchestrator: loaded %d profile(s): %s",
                     len(self.profiles), ", ".join(n for n, _ in self.profiles))

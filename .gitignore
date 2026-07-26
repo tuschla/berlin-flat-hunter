@@ -9,6 +9,10 @@ config.yaml
 # Real profile configs hold Telegram tokens + landlord-portal credentials.
 # Commit a sanitized template separately if you want one in git.
 profiles/*.yaml
+profiles/*.json
+/profile.json
+# Orchestrator config: lists profiles + the shared alert Telegram token.
+hunter.yaml
 *.db
 *.sqlite
 schema_monitor.json
