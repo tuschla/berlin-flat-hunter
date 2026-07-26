@@ -36,6 +36,19 @@ from flathunter.logging import logger
 
 from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.hunter import BerlinHunter
+from berlin_flat_hunter.notify import TelegramNotifier
+
+
+class _TelegramAlertChannel:
+    """Adapts a berlin TelegramNotifier to the ``.notify(msg)`` interface the
+    SchemaMonitor alert dispatch expects, so a crawler-down alert can be routed
+    to a specific bot+chat (each profile has its own bot)."""
+
+    def __init__(self, bot_token: str, chat_ids: list, timeout: float = 30.0):
+        self._n = TelegramNotifier(bot_token, chat_ids, timeout=timeout)
+
+    def notify(self, message: str) -> bool:
+        return self._n.send(message)
 
 
 def _resolve(path: str, base_dir: str) -> str:
@@ -87,8 +100,33 @@ class Orchestrator:
                     len(self.profiles), ", ".join(n for n, _ in self.profiles))
 
         self.lead = self._build_lead(g)
+        self._wire_shared_alert_channels(g)
         union = self.lead.config.target_urls()
         logger.info("Orchestrator: shared crawl over %d unique URL(s)", len(union))
+
+    def _wire_shared_alert_channels(self, g: dict) -> None:
+        """Route crawler-down alerts for the shared crawl to the global alert
+        channel AND to every profile's own Telegram bot (deduped). A shared-crawl
+        outage affects every profile, so each profile owner is told on their own
+        bot (profiles can sit on different bots/chats)."""
+        channels: dict = {}
+
+        def add(tok, chats):
+            tok = (tok or "").strip()
+            chats = tuple(str(c) for c in (chats or []) if str(c).strip())
+            if tok and chats:
+                channels.setdefault((tok, chats), None)
+
+        gt = g.get("telegram", {}) or {}
+        add(gt.get("bot_token"), gt.get("receiver_ids"))
+        for _, hunter in self.profiles:
+            add(hunter.config.telegram_bot_token(), hunter.config.telegram_receiver_ids())
+        if channels:
+            self.lead._alert_notifiers = [
+                _TelegramAlertChannel(tok, list(chats)) for (tok, chats) in channels
+            ]
+            logger.info("Orchestrator: crawler-down alerts → %d Telegram channel(s)",
+                        len(channels))
 
     # ------------------------------------------------------------------
     def _build_lead(self, g: dict) -> BerlinHunter:
