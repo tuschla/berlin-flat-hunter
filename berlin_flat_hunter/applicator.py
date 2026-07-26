@@ -125,6 +125,34 @@ _COMMON_SELECTORS = {
 }
 
 
+class _AttrView:
+    """Expose a dict's keys as attributes (missing → "") so the form catalog's
+    getattr-based applicant lookups don't raise on our plain applicant dict."""
+
+    def __init__(self, d: dict):
+        self._d = d or {}
+
+    def __getattr__(self, name):
+        return self._d.get(name, "")
+
+
+def _wbm_answer_fields(applicant: dict, form_answers: dict) -> dict:
+    """``{powermail_field_name: value}`` for WBM's questionnaire-backed fields
+    (Anrede / WBS / income) drawn from ``form_answers`` via the shared form
+    catalog. Applicant-backed fields resolve empty (different key names) and are
+    dropped; the consent field is excluded (its checkbox is ticked separately).
+    Best-effort — returns ``{}`` if the catalog is unavailable."""
+    if not form_answers:
+        return {}
+    try:
+        from berlin_flat_hunter.forms import catalog
+        vals = catalog.values_for_provider("wbm", _AttrView(applicant), form_answers)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("WBM form-answer mapping unavailable: %s", exc)
+        return {}
+    return {k: v for k, v in vals.items() if v and k != "datenschutzhinweis"}
+
+
 class GewobagApplicator:
     """Submit Anfrage form on a Gewobag listing detail page.
 
@@ -394,6 +422,18 @@ class WbmApplicator:
                     logger.warning("WBM: no form fields matched on %s — selectors may be stale", url)
                     return False
 
+                # Extra questionnaire answers (Anrede/WBS/income) → powermail
+                # fields. Best-effort; wrapped so it never breaks the core apply.
+                # NB: field ids assumed to be powermail_field_<catalog-name>;
+                # verify against the live form (scripts/discover_forms.py) before
+                # relying on WBS/income delivery.
+                for field_name, value in _wbm_answer_fields(self.applicant,
+                                                            getattr(self, "form_answers", {})).items():
+                    _fill_field(driver,
+                                f"#powermail_field_{field_name}, "
+                                f"input[name*='{field_name}'], select[name*='{field_name}']",
+                                value)
+
                 if self.dry_run:
                     logger.info("WBM dry-run: %d fields filled but submit skipped for %s",
                                 filled, url)
@@ -459,6 +499,11 @@ class KleinanzeigenApplicator:
     URL_MATCH = "kleinanzeigen.de"
     SITE_NAME = "Kleinanzeigen"
     LOGIN_URL = "https://www.kleinanzeigen.de/m-einloggen.html"
+    # Sends via the logged-in account, not a per-message "from" address — so the
+    # addy multi-email loop must NOT apply once per alias here (it would spam the
+    # landlord the same message N times, or break login when an alias is used as
+    # the username). AutoApplicator applies exactly once for account-based sites.
+    ACCOUNT_BASED = True
 
     def __init__(self, applicant: dict, dry_run: bool = False, profile_dir: Optional[str] = None):
         self.applicant = applicant
@@ -794,6 +839,12 @@ class AutoApplicator(Processor):
             HowogeApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
             KleinanzeigenApplicator(applicant, dry_run=dry_run, profile_dir=profile_dir),
         ]
+        # Application-questionnaire answers (WBS/income/salutation/consent). Only
+        # WbmApplicator consumes them today; attach to all so the interface is
+        # uniform and future appliers can use them.
+        form_answers = config.form_answers() if hasattr(config, "form_answers") else {}
+        for applicator in self.applicators:
+            applicator.form_answers = form_answers
         self.gate = None
         if apply_cfg.get("ollama_gate", False):
             from berlin_flat_hunter.ollama_apply_gate import OllamaApplyGate
@@ -828,7 +879,14 @@ class AutoApplicator(Processor):
         # single application. Store dedups per (listing, recipient) so a second
         # email isn't re-sent every cycle.
         key = self._listing_key(expose, crawler)
-        for email in self._emails(crawler, key):
+        emails = self._emails(crawler, key)
+        # Account-based sites (Kleinanzeigen) send from the logged-in account, so
+        # apply exactly once regardless of how many alias addresses are selected.
+        if getattr(applicator, "ACCOUNT_BASED", False) and len(emails) > 1:
+            logger.info("%s is account-based — applying once, ignoring %d extra alias(es)",
+                        getattr(applicator, "SITE_NAME", "site"), len(emails) - 1)
+            emails = emails[:1]
+        for email in emails:
             if self._already_sent(key, email, mode):
                 continue
             applicator.applicant = ({**self._base_applicant, "email": email}

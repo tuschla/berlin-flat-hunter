@@ -92,3 +92,22 @@ def test_one_bad_profile_does_not_sink_cycle(tmp_path):
     orch.run_once()  # must not raise
     # The healthy profile still ran despite the first blowing up.
     assert any(ok.values())
+
+
+def test_run_once_records_total_failure_on_crawl_abort(tmp_path):
+    orch = _build(tmp_path)
+
+    def boom(max_pages=None):
+        raise RuntimeError("crawl died")
+
+    orch.lead.crawl_for_exposes = boom
+    ticked = {"n": 0}
+    orch.lead._record_total_failure = lambda: ticked.__setitem__("n", ticked["n"] + 1)
+    processed = {"n": 0}
+    for _, hunter in orch.profiles:
+        hunter.process_raw = lambda raw: processed.__setitem__("n", processed["n"] + 1) or []
+
+    orch.run_once()  # must not raise
+
+    assert ticked["n"] == 1        # down-alert path fired
+    assert processed["n"] == 0     # no per-profile work on a dead crawl
