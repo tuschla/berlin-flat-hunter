@@ -19,8 +19,21 @@ from flathunter.webdriver_crawler import WebdriverCrawler
 from berlin_flat_hunter.applicator import AutoApplicator
 from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
+from berlin_flat_hunter.notify import BerlinNotifier
 from berlin_flat_hunter.ollama_filter import OllamaFilter
 from berlin_flat_hunter.stats import StatsLogger, StatsProcessor
+
+# Non-telegram notifier types are still handled by flathunter's own senders;
+# telegram is handled by BerlinNotifier (per-source routing + heartbeat).
+_EXTRA_NOTIFIERS = {
+    "mattermost": SenderMattermost,
+    "slack": SenderSlack,
+    "apprise": SenderApprise,
+}
+
+# Idle heartbeat cadence: on cycles with no activity, ping the log channel at
+# most this often so it proves the bot is alive without spamming.
+_HEARTBEAT_IDLE_INTERVAL = 3600.0
 
 _NOTIFIER_BUILDERS = {
     "apprise": SenderApprise,
@@ -107,6 +120,12 @@ class BerlinHunter(Hunter):
             AutoApplicator(config, alert_dispatch=self._dispatch_alerts)
             if config.auto_apply_enabled() else None
         )
+
+        # Per-source Telegram routing + optional heartbeat/log channel. Replaces
+        # flathunter's built-in telegram sender; backward compatible with a plain
+        # single-bot `telegram:` config.
+        self._notifier = BerlinNotifier(config)
+        self._last_heartbeat_ts = 0.0
 
         self._stats_processor = None
         if config.stats_enabled():
@@ -292,7 +311,13 @@ class BerlinHunter(Hunter):
         if self._ollama_filter is not None:
             builder.processors.append(self._ollama_filter)
 
-        builder = builder.send_messages()
+        # Notification: BerlinNotifier owns telegram (per-source bots + heartbeat);
+        # any other configured notifier type still goes through flathunter.
+        builder.processors.append(self._notifier)
+        for name in self.config.notifiers():
+            extra = _EXTRA_NOTIFIERS.get(name)
+            if extra is not None:
+                builder.processors.append(extra(self.config))
 
         if self._auto_applicator is not None:
             builder.processors.append(self._auto_applicator)
@@ -301,7 +326,25 @@ class BerlinHunter(Hunter):
         for expose in builder.build().process(raw_exposes):
             logger.info("New offer: %s", expose["title"])
             result.append(expose)
+
+        self._maybe_heartbeat(len(result))
         return result
+
+    def _maybe_heartbeat(self, new_count: int) -> None:
+        """Post a per-cycle heartbeat to the optional log channel. Always fires
+        on a cycle with activity; on idle cycles at most once an hour."""
+        notifier = self._notifier
+        activity = notifier.sent_count > 0 or new_count > 0
+        now = time.time()
+        if not activity and (now - self._last_heartbeat_ts) < _HEARTBEAT_IDLE_INTERVAL:
+            return
+        self._last_heartbeat_ts = now
+        summary = (f"🩺 Zyklus abgeschlossen — {notifier.sent_count} benachrichtigt, "
+                   f"{new_count} neu")
+        try:
+            notifier.send_heartbeat(summary)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Heartbeat send failed: %s", exc)
 
     def _record_health(self, raw_exposes: list[dict]):
         """Update the schema monitor with per-crawler crawl results.

@@ -771,6 +771,9 @@ class AutoApplicator(Processor):
         applicant = config.applicant_config() if hasattr(config, "applicant_config") else {}
         apply_cfg = getattr(config, "config", {}).get("auto_apply", {})
         dry_run = bool(apply_cfg.get("dry_run", False))
+        # Fallback when the config predates per-source modes (e.g. a plain
+        # YamlConfig in tests): the legacy single dry_run flag.
+        self._default_dry_run = dry_run
         # Profile-dir resolution: explicit config wins, env var second
         # (docker compose convention), empty string disables the feature.
         profile_dir = (apply_cfg.get("chrome_profile_dir", "")
@@ -792,6 +795,19 @@ class AutoApplicator(Processor):
         self._last_stale_alert_ts: dict[str, float] = {}
 
     def process_expose(self, expose: dict) -> dict:
+        # Per-source send mode: off = never apply, dry_run = fill but don't
+        # submit, live = submit. Falls back to the legacy global dry_run flag
+        # for configs that don't expose send_mode_for.
+        crawler = expose.get("crawler", "") or ""
+        if hasattr(self.config, "send_mode_for"):
+            mode = self.config.send_mode_for(crawler)
+        else:
+            mode = "dry_run" if self._default_dry_run else "live"
+        if mode == "off":
+            return expose
+        for applicator in self.applicators:
+            applicator.dry_run = (mode != "live")
+
         if self.gate is not None and not self.gate.should_apply(expose):
             logger.info("Ollama gate: skipping application for %s", expose.get("url"))
             return expose
