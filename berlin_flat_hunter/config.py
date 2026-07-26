@@ -111,6 +111,22 @@ class BerlinConfig(YamlConfig):
         raw = self.config.get("form_answers", {}) or {}
         return {str(k): str(v) for k, v in raw.items()}
 
+    def exclude_filter_config(self) -> dict:
+        """Junk-listing exclude shield config. ``keywords`` falls back to the
+        flathunter ``excluded_titles`` list so existing YAML profiles get
+        description-wide matching too; ``use_defaults`` applies the curated
+        shield (senior/sublet/swap/WG/commercial/furnished/parking)."""
+        ex = self.config.get("exclude", {}) or {}
+        keywords = ex.get("keywords")
+        if keywords is None:
+            keywords = self.config.get("excluded_titles", []) or []
+        return {"keywords": list(keywords), "use_defaults": bool(ex.get("use_defaults", True))}
+
+    def wbs_required_setting(self):
+        """Profile's WBS setting: False = applicant has no WBS (drop WBS-only
+        listings), True = has a WBS (keep all), None = not set (filter inactive)."""
+        return (self.config.get("filters", {}) or {}).get("wbs_required")
+
     def state_db_path(self) -> str:
         """Per-profile SQLite for alias/send/imap dedup state. Defaults next to
         the main DB (alongside stats.db / schema_monitor.json)."""

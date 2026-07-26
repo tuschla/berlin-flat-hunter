@@ -117,6 +117,20 @@ class BerlinHunter(Hunter):
             from berlin_flat_hunter.filters.scam_filter import ScamFilter
             self._scam_filter = ScamFilter(config)
 
+        # Junk-listing exclude shield (title+description+address) — always on;
+        # curated defaults toggle via exclude.use_defaults.
+        from berlin_flat_hunter.filters.exclude_filter import ExcludeFilter
+        self._exclude_filter = ExcludeFilter(config)
+        # WBS filter — only active when the profile declares filters.wbs_required: false.
+        from berlin_flat_hunter.filters.wbs_filter import WbsFilter
+        self._wbs_filter = WbsFilter(config) if WbsFilter.enabled_for(config) else None
+
+        # Per-profile source gating: the crawlers whose URL_PATTERN matches this
+        # profile's own target URLs. In shared-scrape mode the pool carries every
+        # profile's sources; this keeps a profile from seeing a source it never
+        # searched (e.g. Kleinanzeigen leaking into a public-housing-only profile).
+        self._enabled_sources = set(self._configured_crawler_names())
+
         # Build alert notifiers up-front so AutoApplicator (which receives
         # _dispatch_alerts as a callback) has a populated list ready by the
         # time it fires its first stale-selector or [MANUAL APPLY] alert.
@@ -326,6 +340,13 @@ class BerlinHunter(Hunter):
         property of the shared crawl, recorded once by whoever crawled, not
         re-ticked per profile.
         """
+        # Per-profile source gating: only process listings from sources THIS
+        # profile actually searches (safety-guarded: if nothing matches, don't
+        # blanket-drop — that would silence a misconfigured profile entirely).
+        if self._enabled_sources:
+            raw_exposes = [e for e in raw_exposes
+                           if e.get("crawler") in self._enabled_sources]
+
         # Normalise ids so flathunter's int(id) in save_expose can't crash the
         # chain on a string-id crawler (Gewobag/degewo). Idempotent, so running
         # it per profile on the shared pool is harmless.
@@ -354,6 +375,10 @@ class BerlinHunter(Hunter):
             builder.processors.append(self._polygon_filter)
         if self._ollama_filter is not None:
             builder.processors.append(self._ollama_filter)
+        if self._exclude_filter is not None:
+            builder.processors.append(self._exclude_filter)
+        if self._wbs_filter is not None:
+            builder.processors.append(self._wbs_filter)
 
         # Notification: BerlinNotifier owns telegram (per-source bots + heartbeat);
         # any other configured notifier type still goes through flathunter.
