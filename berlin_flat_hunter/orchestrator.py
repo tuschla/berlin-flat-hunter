@@ -104,6 +104,20 @@ class Orchestrator:
         union = self.lead.config.target_urls()
         logger.info("Orchestrator: shared crawl over %d unique URL(s)", len(union))
 
+        # ONE shared "general data" log: every listing seen by the shared crawl
+        # is recorded once here (url/title/price/rooms/size/warm+cold/first+last
+        # seen). This is the general dataset — distinct from each profile's
+        # db.sqlite, which is flathunter's per-profile "already seen" dedup state
+        # (operational, needed so each profile notifies its own matches once).
+        self._stats = None
+        stats_cfg = g.get("statistics", {}) or {}
+        if stats_cfg.get("enabled", True):
+            from berlin_flat_hunter.stats import StatsLogger
+            state_dir = os.path.dirname(self.lead.config.database_location()) or "."
+            stats_path = stats_cfg.get("db_path") or os.path.join(state_dir, "stats.db")
+            self._stats = StatsLogger(stats_path)
+            logger.info("Orchestrator: general-data log at %s", stats_path)
+
     def _wire_shared_alert_channels(self, g: dict) -> None:
         """Route crawler-down alerts for the shared crawl to the global alert
         channel AND to every profile's own Telegram bot (deduped). A shared-crawl
@@ -188,6 +202,12 @@ class Orchestrator:
         """One cycle: shared crawl → health → per-profile fan-out."""
         raw = self._dedup(list(self.lead.crawl_for_exposes(max_pages)))
         self.lead._record_health(raw)  # one schema-monitor tick for the shared crawl
+        if self._stats is not None:
+            for expose in raw:
+                try:
+                    self._stats.log(expose)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("General-data log failed for %s: %s", expose.get("url"), exc)
         logger.info("Shared crawl: %d unique expose(s); fanning out to %d profile(s)",
                     len(raw), len(self.profiles))
         for name, hunter in self.profiles:
@@ -219,6 +239,11 @@ class Orchestrator:
             self.lead.close()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Closing lead scraper failed: %s", exc)
+        if self._stats is not None:
+            try:
+                self._stats.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Closing general-data log failed: %s", exc)
 
     # ------------------------------------------------------------------
     @classmethod

@@ -80,9 +80,9 @@ def test_no_api_key_raises():
 
 def test_create_alias_posts_and_returns_email():
     """create_alias resolves defaults, POSTs, and returns the alias record."""
-    domain_opts = {"data": ["anonaddy.me"], "defaultAliasDomain": "anonaddy.me",
+    domain_opts = {"data": ["example-alias.test"], "defaultAliasDomain": "example-alias.test",
                    "defaultAliasFormat": "random_characters"}
-    created = {"data": {"email": "abc123@anonaddy.me", "id": "alias-9"}}
+    created = {"data": {"email": "abc123@example-alias.test", "id": "alias-9"}}
 
     calls = []
 
@@ -97,13 +97,13 @@ def test_create_alias_posts_and_returns_email():
     with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
         rec = _client().create_alias(description="howoge")
 
-    assert rec["email"] == "abc123@anonaddy.me"
+    assert rec["email"] == "abc123@example-alias.test"
     methods = [c[0] for c in calls]
     assert "POST" in methods
     # The POST body carries the resolved domain + format + description.
     post = next(c for c in calls if c[0] == "POST")
     sent = json.loads(post[2])
-    assert sent["domain"] == "anonaddy.me"
+    assert sent["domain"] == "example-alias.test"
     assert sent["format"] == "random_characters"
     assert sent["description"] == "howoge"
 
