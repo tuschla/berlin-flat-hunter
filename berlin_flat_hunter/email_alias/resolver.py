@@ -92,12 +92,17 @@ class AliasResolver:
 
     def emails_for(self, source: str, real_email: str, listing_key: str) -> list[str]:
         """The addresses to submit this application under (always >= 1 when a
-        real email exists)."""
-        out = self._chosen(source)
+        real email exists).
+
+        Explicit ``provider_emails`` for the landlord win outright — those are a
+        deliberate list (e.g. a pool of pre-created aliases), so we don't tack an
+        extra freshly-minted alias onto them. Only when nothing is pre-selected
+        do we mint one addy alias for the granularity bucket."""
+        chosen = self._chosen(source)
+        if chosen:
+            return chosen
         if self.enabled:
             alias = self._alias_for(source, listing_key)
-            if alias and alias not in out:
-                out.append(alias)
-        if not out:
-            out = [real_email] if real_email else []
-        return out
+            if alias:
+                return [alias]
+        return [real_email] if real_email else []
