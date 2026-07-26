@@ -1,66 +1,83 @@
 # Deploy: native systemd (no Docker)
 
-We run the hunter directly on this host via `uv run`, supervised by two
-systemd services — one per profile. Docker is *not* used here; the
-`docker-compose.yml` and `Dockerfile` in the repo root are just an
-alternative deploy path we don't take.
+We run the hunter directly on this host via `uv run`, supervised by systemd.
+Docker is *not* used here; the `docker-compose.yml` and `Dockerfile` in the repo
+root are just an alternative deploy path we don't take.
+
+## Shared scrape, many profiles — one service
+
+`bfh-hunter.service` runs a **single** process (`main.py --hunter hunter.yaml`)
+that crawls every source **once per cycle** and fans the results out to every
+profile listed in `hunter.yaml`. This replaces the old per-profile services
+(`bfh-single` / `bfh-wg`), which each ran a full duplicate crawl of the same
+sites.
+
+- `hunter.yaml` — global settings + the list of profiles (see `hunter.yaml.example`).
+- `profiles/*.yaml` — one file per profile (unchanged format). Each keeps its own
+  filters, telegram, auto-apply, dedup DB, stats and geo settings.
+- Shared crawl state (incl. the single `schema_monitor.json` the watchdog reads)
+  lives next to `global.database_location` in `hunter.yaml`. Per-profile dedup
+  DBs still live under `data/<profile>/`.
+
+Add a profile = add one line under `profiles:` in `hunter.yaml`; the crawl cost
+stays flat.
 
 ## Layout
 
-- `bfh-single.service` — `profiles/single.yaml` (≤€600, 1 room)
-- `bfh-wg.service`     — `profiles/wg.yaml` (≤€1100, 2 rooms)
+- `bfh-hunter.service` — the shared-scrape hunter (all profiles)
 - `bfh-watchdog.service` + `bfh-watchdog.timer` — crawler triage (see below)
-
-Each service runs a `BerlinHunter` loop; both share the same Python venv
-(`.venv/`) but have isolated DBs and schema-monitor state under `data/<profile>/`.
 
 ## One-time install
 
 ```bash
 # Deps already installed via `uv sync` — re-run if pyproject.toml changes.
-sudo install -m 644 deploy/bfh-single.service deploy/bfh-wg.service /etc/systemd/system/
+cp hunter.yaml.example hunter.yaml   # then edit: global settings + profiles list
+sudo install -m 644 deploy/bfh-hunter.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now bfh-single.service bfh-wg.service
+sudo systemctl enable --now bfh-hunter.service
 ```
 
 ## Operate
 
 ```bash
-sudo journalctl -u bfh-single -u bfh-wg -f          # tail both
-sudo systemctl status bfh-single bfh-wg             # state
-sudo systemctl restart bfh-single bfh-wg            # after editing a profile
-sudo systemctl stop bfh-single bfh-wg               # stop both
+sudo journalctl -u bfh-hunter -f            # tail
+sudo systemctl status bfh-hunter            # state
+sudo systemctl restart bfh-hunter           # after editing hunter.yaml or a profile
+sudo systemctl stop bfh-hunter              # stop
 ```
 
 ## Dry-test before going live (recommended once)
 
-`auto_apply.dry_run` is `false` in the profiles, so applications submit for
-real. To do a single fill-but-don't-submit test cycle, edit
-`profiles/single.yaml` to set `auto_apply.dry_run: true`, then:
+Auto-apply mode is per source via `auto_apply.send_modes` (`off` / `dry_run` /
+`live`); the legacy global `auto_apply.dry_run` is the fallback. To do a single
+fill-but-don't-submit cycle for one profile:
 
 ```bash
 cd /root/berlin-flat-hunter
+# temporarily set the profile's auto_apply to dry_run, then:
 /root/.local/bin/uv run python main.py --config profiles/single.yaml --once
+# or one shared cycle across all profiles:
+/root/.local/bin/uv run python main.py --hunter hunter.yaml --once
 ```
-
-Watch the logs for `auto_apply: dry_run filled fields ...` lines — those mean
-selectors still match. Flip `dry_run` back to `false` and start the systemd
-unit.
 
 ## Telegram
 
-Per-listing Telegram is OFF (`notifiers: []` in both profiles). Telegram only
-fires when a crawler returns 0 results for 3 consecutive cycles, or when more
-than 50% of fields are missing — i.e. "the crawler is broken, fix me".
-Routed via `monitoring.alert_notifiers: [telegram]`.
+- **Per-listing** notifications use each profile's own `telegram:` config, and can
+  be routed **per source** to separate bots/chats (`telegram.bots_by_source` /
+  `chats_by_source`). An optional heartbeat/log channel (`telegram.log_bot_token`
+  / `log_chat_id`) gets a per-cycle summary.
+- **Crawler-down** alerts (shared crawl) go to `hunter.yaml`'s `global.telegram`
+  via `global.monitoring.alert_via_notifiers: true`.
 
 ## Crawler watchdog (auto-triage)
 
-When the monitor flags a crawler as down (0 results for 3+ cycles), a timer-driven
-watchdog launches a **read-only** headless Claude Code run to diagnose *why* —
-dead selector, bot-block, or a legitimately empty site — and pushes the diagnosis
-plus a one-command fix to the same Telegram bot. It never edits or commits: a
-human runs the suggested fix. See `scripts/crawler_watchdog.py`.
+When the shared monitor flags a crawler as down (0 results for 3+ cycles), a
+timer-driven watchdog launches a **read-only** headless Claude Code run to
+diagnose *why* — dead selector, bot-block, or a legitimately empty site — and
+pushes the diagnosis plus a one-command fix to the `global.telegram` bot. It
+never edits or commits: a human runs the suggested fix. It now reads the single
+shared `schema_monitor.json` and keys triage per crawler. See
+`scripts/crawler_watchdog.py`.
 
 ```bash
 sudo install -m 644 deploy/bfh-watchdog.service deploy/bfh-watchdog.timer /etc/systemd/system/
@@ -80,8 +97,8 @@ sudo systemctl enable --now bfh-watchdog.timer
 ## Uninstall
 
 ```bash
-sudo systemctl disable --now bfh-single bfh-wg bfh-watchdog.timer
-sudo rm /etc/systemd/system/bfh-single.service /etc/systemd/system/bfh-wg.service \
+sudo systemctl disable --now bfh-hunter bfh-watchdog.timer
+sudo rm /etc/systemd/system/bfh-hunter.service \
         /etc/systemd/system/bfh-watchdog.service /etc/systemd/system/bfh-watchdog.timer
 sudo systemctl daemon-reload
 ```

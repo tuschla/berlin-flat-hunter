@@ -138,3 +138,76 @@ scam_filter:
 statistics:
   enabled: false
   # db_path: "stats.db"   # defaults to alongside the main DB
+
+# ---------------------------------------------------------------------------
+# Shared scraping (multiple profiles, one crawl per cycle)
+# ---------------------------------------------------------------------------
+# To run several profiles without re-crawling each source per profile, use a
+# top-level hunter.yaml (see hunter.yaml.example) and run:
+#     python main.py --hunter hunter.yaml
+# Each profile file keeps the format below; only the network crawl is shared.
+
+# ---------------------------------------------------------------------------
+# Per-source Telegram routing + heartbeat (optional, extends the telegram block)
+# ---------------------------------------------------------------------------
+# telegram:
+#   bot_token: "DEFAULT_BOT_TOKEN"
+#   receiver_ids: [123456789]
+#   # Route a source's notifications to its own bot/chat (falls back to default):
+#   bots_by_source:
+#     Kleinanzeigen: "KA_BOT_TOKEN"
+#   chats_by_source:
+#     Kleinanzeigen: [987654321]
+#   # Optional per-cycle heartbeat/log channel (proves the bot is alive):
+#   log_bot_token: "LOG_BOT_TOKEN"   # falls back to bot_token
+#   log_chat_id: 123456789
+
+# ---------------------------------------------------------------------------
+# Per-source auto-apply mode (optional; overrides the single auto_apply.dry_run)
+# ---------------------------------------------------------------------------
+# auto_apply:
+#   enabled: true
+#   send_modes:              # off = never apply, dry_run = fill only, live = submit
+#     howoge: live
+#     gewobag: dry_run
+#     wbm: off
+
+# ---------------------------------------------------------------------------
+# addy.io email aliases (optional; off unless provider: addy + a key)
+# ---------------------------------------------------------------------------
+# Mints a forwarding alias per landlord/listing so each landlord sees a distinct
+# address; applies once per selected address. All aliases forward to your inbox,
+# which the IMAP confirmer below still scans.
+# email_alias:
+#   provider: addy                 # "none" | "addy"
+#   addy_api_key: "YOUR_ADDY_KEY"
+#   addy_base_url: https://app.addy.io   # override for self-hosted addy.io
+#   addy_domain: ""                # blank => account default alias domain
+#   addy_format: random_words      # random_words | uuid | random_characters | custom
+#   granularity: source            # source (per landlord) | listing | fixed
+#   provider_emails:               # optional explicit addresses per landlord
+#     howoge: ["me+howoge@example.com"]
+
+# ---------------------------------------------------------------------------
+# IMAP double-opt-in confirm + landlord-reply alerts (optional; off by default)
+# ---------------------------------------------------------------------------
+# Bring your own inbox. The hunter logs in over IMAP each cycle, auto-clicks
+# Genossenschaft opt-in links (host-allowlisted), and Telegram-alerts new
+# landlord replies (deduped by Message-ID).
+# email_imap:
+#   enabled: true
+#   host: imap.example.com
+#   port: 993
+#   username: "you@example.com"
+#   password: "APP_PASSWORD"
+#   use_ssl: true
+#   mailbox: INBOX
+#   lookback_days: 7
+
+# ---------------------------------------------------------------------------
+# Application questionnaire answers (optional; keys from the form catalog)
+# ---------------------------------------------------------------------------
+# Extra answers not covered by `applicant:` (WBS/income/consent). Regenerate the
+# catalog with scripts/discover_forms.py. See berlin_flat_hunter/forms/catalog.py.
+# form_answers:
+#   wbs_available: "nein"
