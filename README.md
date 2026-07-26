@@ -2,8 +2,12 @@
 
 Berlin-focused flat-hunting tool. Thin extension layer on top of [flathunter](https://github.com/flathunters/flathunter):
 
-- **Adds** Berlin public-housing crawlers (Gewobag, WBM)
-- **Adds** auto-application via Selenium for Gewobag, WBM, Kleinanzeigen
+- **Adds** Berlin public-housing crawlers (Gewobag, WBM, Gesobau, Howoge, degewo)
+- **Adds** shared scraping — one crawl per source per cycle, fanned out to many profiles
+- **Adds** auto-application for Gewobag, WBM, Kleinanzeigen (Selenium) and Howoge (requests), with per-source `off`/`dry_run`/`live` modes
+- **Adds** per-source Telegram routing + an optional per-cycle heartbeat channel
+- **Adds** addy.io email aliases (a distinct forwarding address per landlord) with one application per address
+- **Adds** IMAP double-opt-in auto-confirm + landlord-reply Telegram alerts
 - **Adds** polygon-based area filtering
 - **Adds** Ollama (local LLM) listing filter and per-application gate
 - **Adds** Kleinanzeigen scam filter (keyword denylist for advance-fee templates)
@@ -37,21 +41,29 @@ cp config.example.yaml config.yaml
 python main.py --config config.yaml
 ```
 
-## Multiple search profiles
+## Multiple search profiles (shared scraping — recommended)
 
-Each profile is an independent YAML config with its own DB, stats, and
-monitor-state files. Two profiles never collide as long as each YAML sets a
-distinct `database_location` (the hunter derives `schema_monitor.json` and
-`stats.db` paths from that directory).
-
-Run two profiles in parallel:
+Each profile is an independent YAML config with its own DB, stats, filters,
+telegram and auto-apply. To run several without re-crawling each source per
+profile, list them in a top-level `hunter.yaml` (see `hunter.yaml.example`) and
+run one process:
 
 ```bash
-python main.py --config profiles/cheap.yaml &
-python main.py --config profiles/family.yaml &
+python main.py --hunter hunter.yaml
 ```
 
-Or use Docker (see below) — one container per profile.
+One *lead* scraper crawls the **union** of all profiles' URLs once per cycle
+(one shared `schema_monitor.json`), then fans the identical exposes out to each
+profile's own filter → notify → apply pipeline. Each profile keeps its own
+`database_location` (so "already seen"/notification dedup is independent). Adding
+a profile is one line in `hunter.yaml`; the crawl cost stays flat. One failing
+profile never sinks the cycle.
+
+Single-profile mode still works for one-off runs:
+
+```bash
+python main.py --config profiles/cheap.yaml --once
+```
 
 ## Docker
 
