@@ -51,7 +51,9 @@ def test_filters_mapping():
     assert c["filters"]["max_rooms"] == 2.0
     assert c["filters"]["min_size"] == 40           # min_size_sqm -> min_size
     assert "max_price" not in c["filters"]          # None dropped
-    assert c["filters"]["excluded_titles"] == ["tausch"]
+    # exclude_keywords now feed the exclude shield (title+description+address)
+    assert c["exclude"]["keywords"] == ["tausch"]
+    assert c["exclude"]["use_defaults"] is True
 
 
 def test_send_modes_and_autoapply():

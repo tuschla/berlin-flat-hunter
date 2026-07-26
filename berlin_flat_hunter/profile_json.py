@@ -72,11 +72,16 @@ def userprofile_to_config(data: dict, *, name: str, data_dir: str = "data") -> d
     for src_key, dst_key in _map.items():
         if filters_in.get(src_key) is not None:
             f[dst_key] = filters_in[src_key]
-    excl = [str(k) for k in (filters_in.get("exclude_keywords") or []) if str(k).strip()]
-    if excl:
-        f["excluded_titles"] = excl
+    # WBS: false = applicant has no WBS → drop WBS-only listings (see WbsFilter).
+    if filters_in.get("wbs_required") is not None:
+        f["wbs_required"] = bool(filters_in["wbs_required"])
     if f:
         cfg["filters"] = f
+    # Junk-listing exclude shield (title+description+address). Carries the user's
+    # exclude_keywords and honours use_default_excludes (curated shield, default on).
+    excl = [str(k) for k in (filters_in.get("exclude_keywords") or []) if str(k).strip()]
+    cfg["exclude"] = {"keywords": excl,
+                      "use_defaults": bool(filters_in.get("use_default_excludes", True))}
 
     # Areas → PLZ (preferred) or polygon (fallback).
     if data.get("neighborhoods"):
