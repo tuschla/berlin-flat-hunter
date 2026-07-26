@@ -255,7 +255,20 @@ class BerlinHunter(Hunter):
     def _hunt_flats_inner(self, max_pages):
         raw_exposes = list(self.crawl_for_exposes(max_pages))
         self._record_health(raw_exposes)
+        return self.process_raw(raw_exposes)
 
+    def process_raw(self, raw_exposes: list[dict]) -> list[dict]:
+        """Run this profile's filter + processor chain over already-crawled
+        exposes and return the ones that survive to notification.
+
+        This is the post-crawl half of a hunt cycle, split out so a shared-scrape
+        orchestrator can crawl every source ONCE and then fan the same raw
+        exposes out to each profile's chain (each profile keeps its own
+        ``id_watch`` dedup, filters, notifiers and auto-applicator). It
+        deliberately does NOT touch the schema monitor: crawl health is a
+        property of the shared crawl, recorded once by whoever crawled, not
+        re-ticked per profile.
+        """
         filter_set = Filter.builder() \
                            .read_config(self.config) \
                            .filter_already_seen(self.id_watch) \

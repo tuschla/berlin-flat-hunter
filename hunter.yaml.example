@@ -1,0 +1,49 @@
+# hunter.yaml — shared-scrape orchestrator config.
+#
+# One process crawls every source ONCE per cycle and fans the results out to
+# every profile below. This replaces running one `main.py --config <profile>`
+# per profile (which re-crawled the same sites N times). Run it with:
+#
+#   python main.py --hunter hunter.yaml
+#
+# Each profile file is an ordinary single-profile config (see
+# config.example.yaml) and keeps its own filters, telegram, auto-apply,
+# database_location (dedup state), stats and geo settings. Only the network
+# scrape is shared.
+
+global:
+  # Shared crawl state. schema_monitor.json (crawler-down health, read by the
+  # watchdog) lives in this directory. Use a dir NOT shared with any profile's
+  # database_location.
+  database_location: /root/berlin-flat-hunter/data/db.sqlite
+
+  loop:
+    active: true
+    sleeping_time: 300   # seconds between shared crawls
+
+  # Extra URLs to crawl once and offer to every profile, for sources no single
+  # profile lists yet (e.g. degewo). Per-profile `filters:` still apply.
+  urls:
+    - https://www.degewo.de/immosuche/
+
+  # Crawler-down alerting for the SHARED crawl (was per-profile before). Alerts
+  # go to the channel configured under `telegram:` here.
+  monitoring:
+    consecutive_empty_threshold: 3
+    alert_via_notifiers: true
+    alert_cooldown_seconds: 3600
+    alert_cooldown_cap_seconds: 86400
+
+  notifiers:
+    - telegram
+
+  # Shared alert channel (crawler-down / schema-change). Per-listing
+  # notifications still use each profile's own telegram config.
+  # telegram:
+  #   bot_token: "YOUR_ALERT_BOT_TOKEN"
+  #   receiver_ids:
+  #     - 123456789
+
+profiles:
+  - profiles/single.yaml
+  - profiles/wg.yaml
