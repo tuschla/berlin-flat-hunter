@@ -1,0 +1,239 @@
+{
+  "howoge": {
+    "listing": "https://www.howoge.de/immobiliensuche/wohnungssuche/detail/1771-14536-9997.html",
+    "status": 200,
+    "fields": [
+      {
+        "name": "tx_howrealestate_visitform[visitRequest][firstName]",
+        "type": "text",
+        "label": "Vorname *",
+        "required": true,
+        "options": []
+      },
+      {
+        "name": "tx_howrealestate_visitform[visitRequest][lastName]",
+        "type": "text",
+        "label": "Nachname *",
+        "required": true,
+        "options": []
+      },
+      {
+        "name": "tx_howrealestate_visitform[visitRequest][email]",
+        "type": "email",
+        "label": "E-Mail *",
+        "required": true,
+        "options": []
+      }
+    ]
+  },
+  "wbm": {
+    "listing": "https://www.wbm.de/wohnungen-berlin/angebote/details/wbs-160-180-220-wohnkomfort-pur-lichtdurchflutete-3-zimmer-mit-balkon/",
+    "status": 200,
+    "fields": [
+      {
+        "name": "tx_powermail_pi1[field][wbsvorhanden]",
+        "type": "radio",
+        "label": "ja",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][wbsvorhanden]",
+        "type": "radio",
+        "label": "nein",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][wbsgueltigbis]",
+        "type": "date",
+        "label": "WBS gültig bis",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][wbszimmeranzahl]",
+        "type": "select",
+        "label": "WBS Zimmeranzahl",
+        "required": false,
+        "options": [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7"
+        ]
+      },
+      {
+        "name": "tx_powermail_pi1[field][einkommensgrenzenacheinkommensbescheinigung9]",
+        "type": "select",
+        "label": "Einkommensgrenze nach Einkommensbescheinigung § 9",
+        "required": false,
+        "options": [
+          "WBS 100",
+          "WBS 140",
+          "WBS 160",
+          "WBS 180",
+          "WBS 220"
+        ]
+      },
+      {
+        "name": "tx_powermail_pi1[field][wbsmitbesonderemwohnbedarf][]",
+        "type": "checkbox",
+        "label": "ja",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][anrede]",
+        "type": "select",
+        "label": "Anrede",
+        "required": false,
+        "options": [
+          "Frau",
+          "Herr",
+          "Offen"
+        ]
+      },
+      {
+        "name": "tx_powermail_pi1[field][name]",
+        "type": "text",
+        "label": "Name *",
+        "required": true,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][vorname]",
+        "type": "text",
+        "label": "Vorname *",
+        "required": true,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][strasse]",
+        "type": "text",
+        "label": "Strasse",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][plz]",
+        "type": "text",
+        "label": "PLZ",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][ort]",
+        "type": "text",
+        "label": "Ort",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][e_mail]",
+        "type": "text",
+        "label": "E-Mail *",
+        "required": true,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][telefon]",
+        "type": "text",
+        "label": "Telefon",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "tx_powermail_pi1[field][datenschutzhinweis][]",
+        "type": "checkbox",
+        "label": "Hiermit bestätige ich, dass ich die Hinweise zum Datenschutz gelesen habe. Ich b",
+        "required": true,
+        "options": []
+      }
+    ]
+  },
+  "gewobag": {
+    "listing": "https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/7100-73709-0103-0078/",
+    "status": 200,
+    "iframe_in_static_html": true,
+    "iframe_src": "https://app.wohnungshelden.de/public/listings/7100%2F73709%2F0103%2F0078/application?c=78f041a8-0c9d-45ba-b290-e1e366cf2e27",
+    "has_listing_id": true,
+    "wohnungshelden_mentions": 2,
+    "scanned": 2,
+    "fields": [
+      {
+        "name": "firstName",
+        "type": "text",
+        "label": "Vorname",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "lastName",
+        "type": "text",
+        "label": "Nachname",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "email",
+        "type": "text",
+        "label": "E-Mail",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "phoneNumber",
+        "type": "text",
+        "label": "Telefonnummer",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "street",
+        "type": "text",
+        "label": "Straße",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "houseNumber",
+        "type": "text",
+        "label": "Nr.",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "zipCode",
+        "type": "text",
+        "label": "PLZ",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "city",
+        "type": "text",
+        "label": "Ort",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "additionalAddressInformation",
+        "type": "text",
+        "label": "Adresszusatz",
+        "required": false,
+        "options": []
+      },
+      {
+        "name": "applicantMessage",
+        "type": "textarea",
+        "label": "Anmerkungen",
+        "required": false,
+        "options": []
+      }
+    ]
+  }
+}
