@@ -1,13 +1,19 @@
 # TODO
 
 ## Open
-- **G5 verify — WBM form-answer field IDs.** `form_answers` (Anrede/WBS/income)
-  are filled into WBM's powermail form best-effort assuming field ids of the form
-  `powermail_field_<catalog-name>` (see `applicator.py:_wbm_answer_fields` /
-  `WbmApplicator.apply`). Verify against the live form with
-  `scripts/discover_forms.py` and correct any names before relying on WBS/income
-  delivery. Low urgency — no current profile has WBM form_answers that matter
-  (jakob's are empty, phil is notify-only).
+- **G5 verify — WBM form-answer field IDs (jakob live-applies to WBM).** jakob's
+  `send_modes` are wbm/gewobag/howoge = **live**. Howoge auto-submit is verified
+  working (16-field payload, 2026-07-27). WBM could NOT be verified because the
+  WBM list fetch was bot-checked (401) that day. `form_answers.salutation: "Herr"`
+  was added to jakob so WBM/Gewobag get *Anrede*, but the powermail field id is
+  still **assumed** (`powermail_field_anrede`, a `<select>`). When WBM is
+  reachable again, dry-run `WbmApplicator` against a live listing (or run
+  `scripts/discover_forms.py`) to confirm the anrede/WBS field names and that a
+  no-Anrede vs Anrede submit validates. `applicator.py:_wbm_answer_fields` /
+  `WbmApplicator.apply`.
+- **WBM crawler currently IP-bot-blocked (401 "Bot check")**, like Kleinanzeigen —
+  datacenter-IP throttling, not a code regression. WBM crawl + applies won't fire
+  until it clears. Watch via the crawler watchdog.
 
 ## Done (2026-07-27)
 Cleared from the parity/code-review backlog:
