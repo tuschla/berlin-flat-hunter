@@ -160,6 +160,20 @@ class StatsLogger:
         ).fetchall()
         return [dict(zip(cols, row)) for row in rows]
 
+    def prune(self, days: int) -> int:
+        """Delete notices not seen within ``days`` days. No-op when ``days`` <= 0.
+        Returns the number of rows removed."""
+        if not days or days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM notices WHERE last_seen_ts IS NOT NULL AND last_seen_ts < ?",
+                (cutoff,),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
     def close(self):
         try:
             self._conn.close()

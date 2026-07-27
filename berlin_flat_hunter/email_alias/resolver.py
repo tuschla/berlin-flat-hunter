@@ -30,11 +30,16 @@ Config (profile YAML ``email_alias:``)::
 """
 from __future__ import annotations
 
+import time
+
 from flathunter.logging import logger
 
 from berlin_flat_hunter.email_alias.addy import AddyClient, AddyError
 
 _GRANULARITIES = ("source", "listing", "fixed")
+# After a failed mint, don't re-hit the addy API for this scope for a while
+# (avoids per-listing API churn while the key/endpoint is down).
+_MINT_RETRY_TTL = 300.0
 
 
 class AliasResolver:
@@ -47,6 +52,8 @@ class AliasResolver:
         self.api_key = str(self.cfg.get("addy_api_key", "") or "").strip()
         gran = str(self.cfg.get("granularity", "source")).lower()
         self.granularity = gran if gran in _GRANULARITIES else "source"
+        # scope_key -> monotonic-ish deadline until which we won't retry minting.
+        self._mint_failed_until: dict[str, float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -86,6 +93,9 @@ class AliasResolver:
         cached = self.store.get_alias(self.user_id, scope) if self.store else None
         if cached:
             return cached
+        now = time.time()
+        if now < self._mint_failed_until.get(scope, 0.0):
+            return ""  # recently failed for this scope — skip the API churn
         try:
             client = AddyClient(self.api_key, self.cfg.get("addy_base_url") or "https://app.addy.io",
                                 timeout=self.timeout)
@@ -96,6 +106,7 @@ class AliasResolver:
             )
         except AddyError as exc:
             logger.warning("addy.io alias minting failed for %s (%s): %s", source, scope, exc)
+            self._mint_failed_until[scope] = now + _MINT_RETRY_TTL
             return ""
         alias = str(rec.get("email", "") or "")
         if alias and self.store:

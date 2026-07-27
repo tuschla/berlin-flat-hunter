@@ -899,7 +899,9 @@ class AutoApplicator(Processor):
                 # by hand. Soft failure: don't tick the stale-selector counter.
                 self._notify_manual_apply(applicator, expose, exc.reason)
                 expose["manual_apply_required"] = True
-                self._record_send(key, email, mode, applicator, ok=False,
+                # Record under mode="manual" so _already_sent suppresses a repeat
+                # alert if the listing reaches the applicator again.
+                self._record_send(key, email, "manual", applicator, ok=False,
                                   message=f"manual apply required: {exc.reason}")
                 break
             except Exception as exc:
@@ -940,9 +942,14 @@ class AutoApplicator(Processor):
     def _already_sent(self, listing_key: str, email: str, mode: str) -> bool:
         if self._store is None:
             return False
+        # A prior manual-apply for this listing means the site needs a human — don't
+        # re-apply or re-alert for any address (recorded listing-wide, mode=manual).
+        if self._store.has_send(self._user_id, listing_key, mode="manual"):
+            return True
         if mode == "live":
             return self._store.has_live_send(self._user_id, listing_key, email)
-        return self._store.has_send(self._user_id, listing_key, mode, email)
+        # dry_run: only a SUCCESSFUL dry-run dedups, so a failed one retries.
+        return self._store.has_send(self._user_id, listing_key, mode, email, ok=True)
 
     def _record_send(self, listing_key: str, email: str, mode: str, applicator,
                      ok: bool, message: str = "") -> None:

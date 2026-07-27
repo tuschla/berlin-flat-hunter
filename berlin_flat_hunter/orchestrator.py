@@ -118,29 +118,40 @@ class Orchestrator:
             self._stats = StatsLogger(stats_path)
             logger.info("Orchestrator: general-data log at %s", stats_path)
 
+        # Optional retention: prune send/imap/general-data rows older than N days
+        # (off by default — data is tiny; set global.retention_days to enable).
+        self._retention_days = int(g.get("retention_days", 0) or 0)
+        self._last_prune = 0.0
+
     def _wire_shared_alert_channels(self, g: dict) -> None:
         """Route crawler-down alerts for the shared crawl to the global alert
         channel AND to every profile's own Telegram bot (deduped). A shared-crawl
         outage affects every profile, so each profile owner is told on their own
         bot (profiles can sit on different bots/chats)."""
-        channels: dict = {}
+        # Group by bot token with a UNION of chat ids, so the same chat behind one
+        # bot (e.g. global + a profile that both use it) is never alerted twice —
+        # even if their receiver_ids only partially overlap.
+        by_token: dict[str, set] = {}
 
         def add(tok, chats):
             tok = (tok or "").strip()
-            chats = tuple(str(c) for c in (chats or []) if str(c).strip())
-            if tok and chats:
-                channels.setdefault((tok, chats), None)
+            if not tok:
+                return
+            for c in (chats or []):
+                c = str(c).strip()
+                if c:
+                    by_token.setdefault(tok, set()).add(c)
 
         gt = g.get("telegram", {}) or {}
         add(gt.get("bot_token"), gt.get("receiver_ids"))
         for _, hunter in self.profiles:
             add(hunter.config.telegram_bot_token(), hunter.config.telegram_receiver_ids())
-        if channels:
+        if by_token:
             self.lead._alert_notifiers = [
-                _TelegramAlertChannel(tok, list(chats)) for (tok, chats) in channels
+                _TelegramAlertChannel(tok, sorted(chats)) for tok, chats in by_token.items()
             ]
-            logger.info("Orchestrator: crawler-down alerts → %d Telegram channel(s)",
-                        len(channels))
+            logger.info("Orchestrator: crawler-down alerts → %d bot(s), %d chat(s)",
+                        len(by_token), sum(len(c) for c in by_token.values()))
 
     # ------------------------------------------------------------------
     def _build_lead(self, g: dict) -> BerlinHunter:
@@ -231,6 +242,26 @@ class Orchestrator:
                 logger.info("Profile %s: %d new offer(s)", name, len(results))
             except Exception:  # noqa: BLE001 — one bad profile must not sink the cycle
                 logger.error("Profile %s processing failed:\n%s", name, traceback.format_exc())
+        self._maybe_prune()
+
+    def _maybe_prune(self) -> None:
+        """Prune old rows at most once a day, if retention is configured."""
+        if self._retention_days <= 0:
+            return
+        now = time.time()
+        if now - self._last_prune < 86400:
+            return
+        self._last_prune = now
+        try:
+            if self._stats is not None:
+                self._stats.prune(self._retention_days)
+            for _, hunter in self.profiles:
+                store = getattr(hunter, "_store", None)
+                if store is not None:
+                    store.prune(self._retention_days)
+            logger.info("Orchestrator: pruned rows older than %d days", self._retention_days)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("prune failed: %s", exc)
 
     def loop(self) -> None:
         if not self.loop_active:
