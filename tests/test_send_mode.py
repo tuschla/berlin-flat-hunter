@@ -13,7 +13,9 @@ def test_send_mode_for_precedence():
     assert c.send_mode_for("howoge") == "live"
     assert c.send_mode_for("Howoge") == "live"          # case-insensitive
     assert c.send_mode_for("wbm") == "off"
-    assert c.send_mode_for("gewobag") == "dry_run"      # falls back to global dry_run
+    # With explicit per-source send_modes, an unlisted source is off (not the
+    # global dry_run fallback) — so an unconfigured crawler never auto-applies.
+    assert c.send_mode_for("gewobag") == "off"
 
 
 def test_send_mode_global_live_and_disabled():

@@ -36,8 +36,30 @@ _GENO_DOMAINS = (
     "gesobau.de",
 )
 
-# Substrings that mark a link as a confirmation / double-opt-in link.
-_CONFIRM_TOKENS = ("bestätig", "bestaetig", "confirm", "opt-in", "optin", "doi", "verify")
+# Substrings that mark a link as a confirmation / double-opt-in link. Kept
+# high-precision (only fetched on trusted Genossenschaft hosts) so we never
+# auto-click an unsubscribe/abmelden link.
+_CONFIRM_TOKENS = ("bestätig", "bestaetig", "confirm", "opt-in", "optin", "doi",
+                   "verify", "aktivier", "freischalt", "double-opt")
+
+# A mail with no confirm link is only surfaced as a landlord reply if it doesn't
+# look automated. noreply senders + newsletter/marketing tells are dropped so
+# Genossenschaft bulk mail doesn't masquerade as a personal reply.
+_NOREPLY_RE = re.compile(
+    r"(no[-_. ]?reply|noreply|newsletter|mailing|do[-_. ]?not[-_. ]?reply|"
+    r"kein[-_. ]?antwort|donotreply)", re.IGNORECASE)
+_NEWSLETTER_TELLS = (
+    "newsletter", "wohnungsangebote", "mietangebote", "angebote der woche",
+    "abmelden", "unsubscribe", "abbestellen", "jobangebote", "aktuelle angebote",
+)
+
+
+def _is_automated(sender: str, subject: str, body: str) -> bool:
+    """True for no-reply / newsletter / marketing mail (not a landlord reply)."""
+    if _NOREPLY_RE.search(sender or ""):
+        return True
+    low = (f"{subject} {body[:600]}").lower()
+    return any(tell in low for tell in _NEWSLETTER_TELLS)
 
 _HREF_RE = re.compile(r"""href=["']([^"']+)["']""", re.IGNORECASE)
 _URL_RE = re.compile(r'''https?://[^\s"'<>)]+''', re.IGNORECASE)
@@ -217,7 +239,8 @@ class ImapConfirmer:
                 if not any(d in sender.lower() for d in _GENO_DOMAINS):
                     continue
                 subject = _decode(msg.get("Subject", ""))
-                links = _extract_confirm_links(_body_text(msg))
+                body = _body_text(msg)
+                links = _extract_confirm_links(body)
                 if links:
                     # Double-opt-in mail: auto-confirm each link.
                     for url in links:
@@ -228,8 +251,9 @@ class ImapConfirmer:
                         if ok:
                             self.record_confirmation(subject, url, ok)
                         results.append((subject, url, ok))
-                else:
-                    # No confirm link -> a real reply (viewing invite, answer).
+                elif not _is_automated(sender, subject, body):
+                    # No confirm link and not automated -> a real reply
+                    # (viewing invite, answer). Newsletters/no-reply are skipped.
                     mid = (
                         _decode(msg.get("Message-ID", "")).strip()
                         or f"{sender.lower()}|{subject}"

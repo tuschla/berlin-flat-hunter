@@ -96,6 +96,11 @@ class BerlinConfig(YamlConfig):
             if str(key).lower() == str(source).lower():
                 mode = str(val).lower()
                 return mode if mode in ("off", "dry_run", "live") else "off"
+        if modes:
+            # Explicit per-source config present → a source not listed never
+            # applies (avoids an unconfigured crawler like Kleinanzeigen quietly
+            # inheriting the global dry_run default).
+            return "off"
         if not cfg.get("enabled", False):
             return "off"
         return "dry_run" if cfg.get("dry_run", True) else "live"

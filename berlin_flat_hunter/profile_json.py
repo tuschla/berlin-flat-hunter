@@ -98,7 +98,10 @@ def userprofile_to_config(data: dict, *, name: str, data_dir: str = "data") -> d
     # Per-source send modes → auto_apply.send_modes (+ enable if any active).
     send_modes = {}
     for s, p in sources.items():
-        mode = str((p or {}).get("send_mode", "off")).lower()
+        p = p or {}
+        mode = str(p.get("send_mode", "off")).lower()
+        if not p.get("enabled", True):
+            mode = "off"  # a disabled source never applies, whatever its send_mode
         send_modes[s] = mode if mode in _SEND_MODES else "off"
     if any(m in ("dry_run", "live") for m in send_modes.values()):
         cfg["auto_apply"] = {"enabled": True, "send_modes": send_modes}

@@ -167,7 +167,7 @@ def test_non_allowlisted_host_not_fetched(patch_imap, capture_get):
     evil = "https://evil.example.net/confirm?token=xyz"
     FakeIMAP.mails = [
         _make_mail(
-            "Howoge <noreply@howoge.de>",
+            "Howoge Kundenservice <kundenservice@howoge.de>",  # human sender (not noreply)
             "Bitte bestätigen",
             f'<a href="{evil}">confirm</a>',
             html=True,

@@ -124,8 +124,11 @@ class Store:
         return row is not None
 
     def has_send(self, user_id: str, listing_key: str, mode: str | None = None,
-                 recipient: str | None = None) -> bool:
-        """Any send attempt recorded for this listing (optionally mode/recipient)."""
+                 recipient: str | None = None, ok: bool | None = None) -> bool:
+        """Any send attempt recorded for this listing (optionally mode/recipient/ok).
+
+        Pass ``ok=True`` to require a *successful* send — used for dry_run dedup so
+        a failed dry-run retries next cycle (parity with has_live_send)."""
         sql = "SELECT 1 FROM sends WHERE user_id = ? AND listing_key = ?"
         params: list[Any] = [user_id, listing_key]
         if mode:
@@ -134,6 +137,9 @@ class Store:
         if recipient is not None:
             sql += " AND recipient = ?"
             params.append(recipient)
+        if ok is not None:
+            sql += " AND ok = ?"
+            params.append(1 if ok else 0)
         sql += " LIMIT 1"
         return self._conn.execute(sql, params).fetchone() is not None
 
@@ -166,6 +172,20 @@ class Store:
             (user_id, message_id, int(time.time())),
         )
         self._conn.commit()
+
+    def prune(self, days: int) -> dict[str, int]:
+        """Delete send/imap/email-notification rows older than ``days`` days.
+        Aliases are kept (small, and deleting one would force a re-mint). No-op
+        when ``days`` <= 0. Returns per-table delete counts."""
+        if not days or days <= 0:
+            return {}
+        cutoff = int(time.time()) - days * 86400
+        counts: dict[str, int] = {}
+        for table in ("sends", "imap_confirmations", "email_notifications"):
+            cur = self._conn.execute(f"DELETE FROM {table} WHERE ts < ?", (cutoff,))
+            counts[table] = cur.rowcount
+        self._conn.commit()
+        return {k: v for k, v in counts.items() if v}
 
     def close(self) -> None:
         try:
