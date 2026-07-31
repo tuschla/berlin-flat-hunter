@@ -153,6 +153,41 @@ def _wbm_answer_fields(applicant: dict, form_answers: dict) -> dict:
     return {k: v for k, v in vals.items() if v and k != "datenschutzhinweis"}
 
 
+def _fill_wbm_extra(driver, field_name: str, value: str) -> None:
+    """Fill one WBM powermail extra field (Anrede/WBS/income) DEFENSIVELY.
+
+    Handles both text inputs and ``<select>`` dropdowns (Anrede is a select, and
+    ``clear()``/``send_keys`` on a select raises ``invalid element state`` — which
+    previously crashed the whole application). Never raises: an unknown/stale
+    field is skipped, so it can't break the core apply. Best-effort — the exact
+    field ids/options need live verification (see TODO.md G5)."""
+    if not value:
+        return
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import Select
+    for sel in (f"#powermail_field_{field_name}", f"[name*='{field_name}']"):
+        try:
+            el = driver.find_element(By.CSS_SELECTOR, sel)
+        except Exception:
+            continue
+        try:
+            if (el.tag_name or "").lower() == "select":
+                select = Select(el)
+                try:
+                    select.select_by_visible_text(value)
+                except Exception:
+                    try:
+                        select.select_by_value(value)
+                    except Exception:
+                        logger.debug("WBM: select %s has no option %r", field_name, value)
+            else:
+                el.clear()
+                el.send_keys(value)
+        except Exception as exc:  # noqa: BLE001 — never let an extra field break apply
+            logger.debug("WBM: could not fill extra field %s: %s", field_name, exc)
+        return
+
+
 class GewobagApplicator:
     """Submit Anfrage form on a Gewobag listing detail page.
 
@@ -429,10 +464,7 @@ class WbmApplicator:
                 # relying on WBS/income delivery.
                 for field_name, value in _wbm_answer_fields(self.applicant,
                                                             getattr(self, "form_answers", {})).items():
-                    _fill_field(driver,
-                                f"#powermail_field_{field_name}, "
-                                f"input[name*='{field_name}'], select[name*='{field_name}']",
-                                value)
+                    _fill_wbm_extra(driver, field_name, value)
 
                 if self.dry_run:
                     logger.info("WBM dry-run: %d fields filled but submit skipped for %s",
