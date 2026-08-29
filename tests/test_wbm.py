@@ -48,12 +48,22 @@ class TestWbmCrawler(unittest.TestCase):
         for key in ("id", "url", "title", "address", "rooms", "size", "price", "crawler"):
             self.assertIn(key, results[0])
 
-    def test_id_is_int_from_data_uid(self):
+    def test_id_is_stable_int_from_url_slug(self):
+        # WBM's data-uid is unstable (changes for the same listing over time), so
+        # identity is a stable crc32 of the URL slug — same URL => same id, and it
+        # is a plain int for flathunter's int(id) dedup.
+        import zlib
+
         with req_mock.Mocker() as m:
             m.get(req_mock.ANY, text=_fixture_html())
             results = self.crawler.get_results(SEARCH_URL, max_pages=1)
-        self.assertEqual(results[0]["id"], 76671)
-        self.assertEqual(results[1]["id"], 76672)
+
+        for r in results:
+            slug = r["url"].rstrip("/").rsplit("/", 1)[-1]
+            self.assertEqual(r["id"], zlib.crc32(slug.encode("utf-8")))
+            self.assertIsInstance(r["id"], int)
+        # distinct listings get distinct ids
+        self.assertNotEqual(results[0]["id"], results[1]["id"])
 
     def test_entry_url_is_absolute(self):
         with req_mock.Mocker() as m:
