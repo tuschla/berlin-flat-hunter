@@ -40,3 +40,31 @@ def test_idempotent():
     first = e["id"]
     _coerce_expose_id(e)
     assert e["id"] == first
+
+
+def test_url_keyed_crawler_id_from_slug_not_uid():
+    import zlib
+
+    # Same WBM listing, DIFFERENT volatile data-uid on two crawls -> same id,
+    # because identity comes from the URL slug, not the uid.
+    url = "https://www.wbm.de/wohnungen-berlin/angebote/details/1-zimmer-in-mitte/"
+    e1 = {"id": 77574, "crawler": "Wbm", "url": url}
+    e2 = {"id": 99999, "crawler": "Wbm", "url": url}
+    _coerce_expose_id(e1)
+    _coerce_expose_id(e2)
+    assert e1["id"] == e2["id"] == zlib.crc32(b"1-zimmer-in-mitte")
+
+
+def test_url_keyed_applies_to_all_genossenschaften():
+    for crawler in ("Gewobag", "Howoge", "Gesobau", "Wbm"):
+        e = {"id": "volatile-uid", "crawler": crawler, "url": "https://x/y/the-flat/"}
+        _coerce_expose_id(e)
+        assert isinstance(e["id"], int)
+        assert e["id"] == __import__("zlib").crc32(b"the-flat")
+
+
+def test_stable_uid_crawler_untouched():
+    # Kleinanzeigen has a stable numeric id — keep it.
+    e = {"id": 3430781419, "crawler": "Kleinanzeigen", "url": "https://ka/x"}
+    _coerce_expose_id(e)
+    assert e["id"] == 3430781419
