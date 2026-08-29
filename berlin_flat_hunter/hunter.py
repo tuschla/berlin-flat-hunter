@@ -37,24 +37,44 @@ _EXTRA_NOTIFIERS = {
 _HEARTBEAT_IDLE_INTERVAL = 3600.0
 
 
-def _coerce_expose_id(expose: dict) -> None:
-    """Ensure ``expose['id']`` is int-coercible in place.
+# Berlin public-housing crawlers whose site-provided uid is NOT stable across
+# crawls for the same listing (WBM's data-uid walks 77574→77593→…; Gewobag's
+# openimmo number, Howoge's JSON uid and Gesobau's data-apartment-uid all drift
+# too). The detail URL is the reliable natural key, so for these we derive the
+# id from the URL. Without this the same listing re-notifies and — once
+# auto-apply is live — RE-APPLIES every time its uid changes. (Kleinanzeigen's
+# numeric ad id is stable, degewo already falls back to its slug — not listed.)
+_URL_KEYED_CRAWLERS = frozenset({"Gewobag", "Howoge", "Gesobau", "Wbm"})
 
-    flathunter's ``IdMaintainer.save_expose`` does ``int(expose['id'])`` and
-    raises on anything non-numeric — which crashes the whole process chain
-    mid-stream. Several crawlers legitimately carry string ids (Gewobag's
-    openimmo object number like ``W1300.42303.0131-0504``, degewo's URL slug),
-    so map any non-numeric id to a stable non-negative int (crc32 of the string,
-    or the URL as a last resort). Stable input → stable id, so cross-cycle
-    "already seen" dedup is preserved.
+
+def _url_slug(url: str) -> str:
+    return url.rstrip("/").rsplit("/", 1)[-1] or url
+
+
+def _coerce_expose_id(expose: dict) -> None:
+    """Ensure ``expose['id']`` is a STABLE int-coercible identity, in place.
+
+    Two jobs:
+    1. For crawlers with unstable site uids (``_URL_KEYED_CRAWLERS``), replace the
+       id with ``crc32`` of the detail-URL slug so the same listing keeps one
+       identity across crawls (dedup / already-seen / apply-dedup all key on id).
+    2. Otherwise, keep an int id as-is, but map any non-numeric id (e.g. a raw
+       Gewobag openimmo string) to a stable crc32 int — flathunter's
+       ``IdMaintainer.save_expose`` does ``int(expose['id'])`` and would crash
+       the whole chain on a non-numeric value.
     """
+    crawler = expose.get("crawler", "")
+    url = str(expose.get("url", "") or "")
+    if crawler in _URL_KEYED_CRAWLERS and url:
+        expose["id"] = zlib.crc32(_url_slug(url).encode("utf-8"))
+        return
     raw = expose.get("id")
     try:
         int(raw)
         return
     except (TypeError, ValueError):
         pass
-    basis = str(raw) if raw not in (None, "") else str(expose.get("url", ""))
+    basis = str(raw) if raw not in (None, "") else url
     expose["id"] = zlib.crc32(basis.encode("utf-8"))
 
 _NOTIFIER_BUILDERS = {

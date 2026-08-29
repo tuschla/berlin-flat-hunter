@@ -48,21 +48,23 @@ class TestWbmCrawler(unittest.TestCase):
         for key in ("id", "url", "title", "address", "rooms", "size", "price", "crawler"):
             self.assertIn(key, results[0])
 
-    def test_id_is_stable_int_from_url_slug(self):
-        # WBM's data-uid is unstable (changes for the same listing over time), so
-        # identity is a stable crc32 of the URL slug — same URL => same id, and it
-        # is a plain int for flathunter's int(id) dedup.
+    def test_stable_url_keyed_id_after_coercion(self):
+        # WBM's data-uid is unstable; the crawler emits it, but the stable
+        # identity is applied centrally (BerlinHunter._coerce_expose_id keys WBM
+        # off the URL slug). Simulate that here.
         import zlib
+
+        from berlin_flat_hunter.hunter import _coerce_expose_id
 
         with req_mock.Mocker() as m:
             m.get(req_mock.ANY, text=_fixture_html())
             results = self.crawler.get_results(SEARCH_URL, max_pages=1)
 
         for r in results:
+            _coerce_expose_id(r)
             slug = r["url"].rstrip("/").rsplit("/", 1)[-1]
             self.assertEqual(r["id"], zlib.crc32(slug.encode("utf-8")))
             self.assertIsInstance(r["id"], int)
-        # distinct listings get distinct ids
         self.assertNotEqual(results[0]["id"], results[1]["id"])
 
     def test_entry_url_is_absolute(self):

@@ -1,6 +1,5 @@
 """WBM crawler — extends flathunter's Crawler base"""
 import re
-import zlib
 from typing import Optional
 
 from bs4 import BeautifulSoup, Tag
@@ -105,16 +104,17 @@ class Wbm(Crawler):
         return BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
 
     def _parse_item(self, item: Tag) -> dict | None:
-        # NB: WBM's ``data-uid`` is NOT stable — it changes for the same listing
-        # every day or two (observed walking 77574→77593→77652… for one flat),
-        # which made the same listing re-notify (and, once live, re-apply)
-        # repeatedly and pile up duplicate rows in the stats DB. The detail URL
-        # slug IS stable, so we derive a stable int id from it instead. We still
-        # require a data-uid to be present as a "this is a real listing card"
-        # signal, but we don't use its value as the identity.
+        # NB: WBM's ``data-uid`` is NOT a stable identity — it changes for the
+        # same listing every day or two. We keep it only as a "this is a real
+        # listing card" signal; the stable identity is derived centrally from the
+        # detail URL in ``BerlinHunter._coerce_expose_id`` (_URL_KEYED_CRAWLERS).
         uid_str = self._str_attr(item, "data-uid")
         if not uid_str:
             return None
+        try:
+            uid = int(uid_str)
+        except ValueError:
+            uid = uid_str
 
         title = self._text(item, "imageTitle")
         if not title:
@@ -127,19 +127,12 @@ class Wbm(Crawler):
         if not href:
             return None
 
-        url = self._absolute_url(href)
-        # Stable identity: crc32 of the URL slug (last non-empty path segment),
-        # falling back to the whole URL. Deterministic int → flathunter's
-        # int(id) dedup + stats key stay constant across crawls.
-        slug = url.rstrip("/").rsplit("/", 1)[-1] or url
-        uid = zlib.crc32(slug.encode("utf-8"))
-
         img_wrap = item.find(class_="imgWrap")
         img_src = self._str_attr(img_wrap, "data-img-src") if isinstance(img_wrap, Tag) else ""
 
         return {
             "id": uid,
-            "url": url,
+            "url": self._absolute_url(href),
             "image": self._absolute_url(img_src) if img_src else "",
             "title": title,
             "address": self._text(item, "address"),
