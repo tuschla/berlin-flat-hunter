@@ -19,6 +19,12 @@ De-dup: one triage per *down episode*. An episode is keyed by the crawler's
 that recovers and breaks again is triaged afresh, while one that stays broken is
 re-triaged at most once per ``RETRIGGER_COOLDOWN``.
 
+Stall check: the hunter rewrites schema_monitor.json every cycle (~6 min). If
+it is older than ``STALL_AFTER`` (env ``BFH_STALL_AFTER``, default 30 min) the
+process is alive but stuck mid-cycle — per-crawler health is frozen then, so
+the down-crawler check can't see it. That sends a plain Telegram alert (no
+Claude triage), once per stall episode with the same re-nag cooldown.
+
 Run manually:  python scripts/crawler_watchdog.py --dry-run   # print, don't act
                python scripts/crawler_watchdog.py --force     # ignore de-dup
 """
@@ -41,6 +47,12 @@ REPO_DIR = os.environ.get("BFH_REPO", "/root/berlin-flat-hunter")
 CLAUDE_BIN = os.environ.get("BFH_CLAUDE_BIN", "/usr/bin/claude")
 CLAUDE_TIMEOUT = int(os.environ.get("BFH_CLAUDE_TIMEOUT", str(20 * 60)))  # seconds
 RETRIGGER_COOLDOWN = int(os.environ.get("BFH_RETRIGGER_COOLDOWN", str(24 * 3600)))
+# The hunter rewrites schema_monitor.json at the end of every crawl cycle
+# (~6 min apart). A file older than this means the process is alive but no
+# cycle is completing (e.g. a crawler stuck in a loop) — per-crawler health
+# is frozen then, so the down-crawler check alone can't see it.
+STALL_AFTER = int(os.environ.get("BFH_STALL_AFTER", str(30 * 60)))  # seconds
+STALL_KEY = "hunter:stall"
 WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 
 # The Telegram bot delivers to Dezső's chat, not the maintainer's. Every alert
@@ -112,6 +124,15 @@ def shared_monitor_path(hunter_cfg: dict | None = None) -> str:
     db = (cfg.get("global", {}) or {}).get("database_location", "")
     state_dir = os.path.dirname(db) if db else os.path.join(REPO_DIR, "data")
     return os.path.join(state_dir, "schema_monitor.json")
+
+
+def last_cycle_ts(monitor_path: str) -> float:
+    """When the hunter last completed a crawl cycle (mtime of the shared
+    schema_monitor.json, rewritten every cycle); 0.0 if it doesn't exist yet."""
+    try:
+        return os.path.getmtime(monitor_path)
+    except FileNotFoundError:
+        return 0.0
 
 
 def hunter_telegram_and_urls(hunter_cfg: dict | None = None) -> tuple[str, list[str], list[str]]:
@@ -244,7 +265,29 @@ def main() -> int:
 
     hunter_cfg = _load_hunter_cfg()
     token, ids, urls = hunter_telegram_and_urls(hunter_cfg)
-    state = load_json(shared_monitor_path(hunter_cfg))
+    monitor_path = shared_monitor_path(hunter_cfg)
+    state = load_json(monitor_path)
+
+    last_tick = last_cycle_ts(monitor_path)
+    if last_tick and now - last_tick >= STALL_AFTER:
+        any_down = True
+        when, ago = human_ago(last_tick)
+        # One alert per stall episode: the frozen mtime identifies the episode,
+        # so should_trigger's episode/cooldown logic applies unchanged.
+        tick = {"last_success_ts": last_tick}
+        if not should_trigger(wd_state, STALL_KEY, tick, now, args.force):
+            log(f"{STALL_KEY}: no crawl cycle completed for {ago} — already alerted this episode")
+        elif args.dry_run:
+            log(f"{STALL_KEY}: no crawl cycle completed for {ago} (last {when}); "
+                f"DRY-RUN: would Telegram {ids or '[]'}")
+        else:
+            log(f"{STALL_KEY}: no crawl cycle completed for {ago} (last {when}); alerting")
+            send_telegram(token, ids, (
+                f"🔴 Watchdog: il hunter non completa un ciclo di scansione da {ago} "
+                f"(ultimo: {when}) — probabilmente bloccato. Nessun annuncio viene "
+                f"cercato finché non riparte (sudo systemctl restart bfh-hunter)."
+                f"\n\n{DEZSO_NOTE}"))
+            wd_state[STALL_KEY] = {"handled_success_ts": last_tick, "trigger_ts": now}
 
     for crawler, health in down_crawlers(state):
         any_down = True

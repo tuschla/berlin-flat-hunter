@@ -18,6 +18,11 @@ JSON_ENDPOINT = f"{BASE_URL}/?type=999&tx_howrealestate_json_list%5Baction%5D=im
 
 _PAGE_SIZE = 50
 
+# Hard ceiling on pages per crawl when the caller passes no ``max_pages``
+# (the orchestrator never does). 20 × 50 = 1000 listings, ~20× Howoge's
+# typical stock; hitting it means pagination is broken, not that it's busy.
+_MAX_PAGES = 20
+
 _SESSION = requests.Session()
 
 
@@ -51,18 +56,36 @@ class Howoge(Crawler):
 
     def get_results(self, search_url: str, max_pages: Optional[int] = None) -> list:
         entries: list = []
+        seen_uids: set = set()
+        page_cap = max_pages if max_pages is not None else _MAX_PAGES
         page = 1
         while True:
             batch = self._fetch_page(page)
             if not batch:
                 break
+            new = 0
             for item in batch:
+                uid = item.get("uid")
+                if uid in seen_uids:
+                    continue
+                seen_uids.add(uid)
+                new += 1
                 entry = self._parse_item(item)
                 if entry:
                     entries.append(entry)
-            if max_pages is not None and page >= max_pages:
+            # The live endpoint ignores the page/limit params and returns the
+            # full list for every page. A page with nothing new means we've
+            # seen everything; without this a list of ≥ _PAGE_SIZE items is
+            # re-fetched forever (each page looks "full").
+            if not new:
                 break
             if len(batch) < _PAGE_SIZE:
+                break
+            if page >= page_cap:
+                if max_pages is None:
+                    logger.warning("Howoge: stopped at the %d-page cap with every page "
+                                   "still returning new listings — pagination may be broken",
+                                   _MAX_PAGES)
                 break
             page += 1
         return entries

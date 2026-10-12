@@ -2,11 +2,13 @@
 import json
 import os
 import unittest
+from urllib.parse import parse_qs
 
 import requests
 import requests_mock as req_mock
 from bs4 import BeautifulSoup
 
+from berlin_flat_hunter.crawlers import howoge
 from berlin_flat_hunter.crawlers.howoge import Howoge, JSON_ENDPOINT
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "howoge_index.json")
@@ -204,6 +206,56 @@ class TestHowogeCrawler(unittest.TestCase):
 
     def test_crawler_name_is_string(self):
         self.assertIsInstance(self.crawler.get_name(), str)
+
+
+def _items(first_uid: int, n: int) -> list[dict]:
+    return [{"uid": first_uid + i, "link": f"/wohnung/{first_uid + i}.html",
+             "title": "Teststraße 1, 10115 Berlin", "rooms": 2, "area": 50, "rent": 600}
+            for i in range(n)]
+
+
+def _page_of(request) -> int:
+    return int(parse_qs(request.text)["tx_howrealestate_json_list[page]"][0])
+
+
+class TestHowogePagination(unittest.TestCase):
+    """The live endpoint ignores page/limit and returns the full list on every
+    page; with ≥ 50 listings the crawler used to re-fetch it forever."""
+
+    def setUp(self):
+        self.crawler = Howoge(FakeConfig())
+
+    def _crawl(self, respond):
+        with req_mock.Mocker() as m:
+            m.post(JSON_ENDPOINT, json=lambda request, context: {
+                "immoobjects": respond(_page_of(request))})
+            results = self.crawler.get_results(SEARCH_URL)
+            return results, m.call_count
+
+    def test_page_ignoring_endpoint_terminates_at_and_above_page_size(self):
+        for n in (50, 60):
+            with self.subTest(listings=n):
+                results, calls = self._crawl(lambda page, n=n: _items(1, n))
+                self.assertEqual(len(results), n)
+                self.assertEqual(calls, 2)
+
+    def test_below_page_size_needs_one_request(self):
+        results, calls = self._crawl(lambda page: _items(1, 49))
+        self.assertEqual(len(results), 49)
+        self.assertEqual(calls, 1)
+
+    def test_real_pagination_still_collects_every_page(self):
+        pages = {1: _items(1, 50), 2: _items(51, 10)}
+        results, calls = self._crawl(lambda page: pages.get(page, []))
+        self.assertEqual(sorted(r["id"] for r in results), list(range(1, 61)))
+        self.assertEqual(calls, 2)
+
+    def test_runaway_pagination_stops_at_page_cap(self):
+        # Every page full of never-seen listings: only the cap can stop it.
+        results, calls = self._crawl(lambda page: _items(page * 1000, 50))
+        self.assertEqual(calls, howoge._MAX_PAGES)
+        self.assertEqual(len(results), 50 * howoge._MAX_PAGES)
+
 
 
 if __name__ == "__main__":

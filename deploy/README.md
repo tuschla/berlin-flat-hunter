@@ -88,6 +88,10 @@ sudo systemctl enable --now bfh-watchdog.timer
 - Runs 5 min after boot, then every 15 min. De-dups to one triage per *down
   episode*; re-triages a still-broken crawler at most once per 24h
   (`BFH_RETRIGGER_COOLDOWN`).
+- Also alerts (plain Telegram, no triage) when no crawl cycle has completed for
+  30 min (`BFH_STALL_AFTER`, seconds): the hunter is alive but stuck mid-cycle,
+  which freezes the per-crawler health the down check reads. Same de-dup and
+  cooldown, keyed per stall.
 - Manual: `python scripts/crawler_watchdog.py --dry-run` (print, don't act) or
   `--force` (ignore de-dup). Trigger a real run now: `sudo systemctl start bfh-watchdog.service`.
 - The Claude run is sandboxed via `--allowedTools` (Read/Grep/Glob/WebFetch +

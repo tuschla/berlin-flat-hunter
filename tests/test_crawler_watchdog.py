@@ -1,8 +1,11 @@
 """Tests for the crawler watchdog's pure decision logic (no Claude/Telegram)."""
+import json
 import os
 import sys
+import tempfile
 import time
 import unittest
+from unittest import mock
 
 import requests_mock as req_mock  # noqa: E402
 
@@ -63,6 +66,55 @@ class TestShouldTrigger(unittest.TestCase):
     def test_force_always_triggers(self):
         state = {"single:KA": {"handled_success_ts": 1000.0, "trigger_ts": self.now}}
         self.assertTrue(wd.should_trigger(state, "single:KA", self.health, self.now, True))
+
+
+class TestStallAlert(unittest.TestCase):
+    """A hunter stuck mid-cycle stops rewriting schema_monitor.json; per-crawler
+    health is frozen then, so the watchdog must alert on the file's age."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        hunter_yaml = os.path.join(self.tmp.name, "hunter.yaml")
+        with open(hunter_yaml, "w") as f:
+            f.write(f"global:\n  database_location: {self.tmp.name}/db.sqlite\n"
+                    "  telegram:\n    bot_token: tok\n    receiver_ids: [42]\n")
+        self.monitor = os.path.join(self.tmp.name, "schema_monitor.json")
+        with open(self.monitor, "w") as f:
+            json.dump({"Howoge": {"consecutive_empty": 0, "consecutive_alerts": 0}}, f)
+        self.sent: list[str] = []
+        for patcher in (
+            mock.patch.object(wd, "HUNTER_YAML", hunter_yaml),
+            mock.patch.object(wd, "WATCHDOG_STATE", os.path.join(self.tmp.name, "wd.json")),
+            mock.patch.object(wd, "send_telegram",
+                              lambda token, ids, text: self.sent.append(text) or True),
+            mock.patch.object(sys, "argv", ["crawler_watchdog.py"]),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _last_cycle_ago(self, seconds: float):
+        ts = time.time() - seconds
+        os.utime(self.monitor, (ts, ts))
+
+    def test_recent_cycle_does_not_alert(self):
+        self._last_cycle_ago(wd.STALL_AFTER - 60)
+        wd.main()
+        self.assertEqual(self.sent, [])
+
+    def test_stalled_cycle_alerts_once_per_episode(self):
+        self._last_cycle_ago(wd.STALL_AFTER + 60)
+        wd.main()
+        wd.main()  # next timer tick, still stuck on the same cycle
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("bfh-hunter", self.sent[0])
+
+    def test_new_stall_after_recovery_alerts_again(self):
+        self._last_cycle_ago(wd.STALL_AFTER + 600)
+        wd.main()
+        self._last_cycle_ago(wd.STALL_AFTER + 60)  # cycles resumed, then stuck again
+        wd.main()
+        self.assertEqual(len(self.sent), 2)
 
 
 class TestHelpers(unittest.TestCase):
