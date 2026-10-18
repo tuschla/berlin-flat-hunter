@@ -4,7 +4,7 @@ Two modes:
 
 * ``--hunter hunter.yaml`` — **shared-scrape** mode (recommended). One process
   crawls every source once per cycle and fans the results out to all listed
-  profiles. This is what the ``bfh-hunter`` systemd service runs.
+  profiles. This is what the ``hunter`` service of the TrueNAS app runs.
 * ``--config profile.yaml`` — legacy single-profile mode. One profile, one full
   crawl. Kept for one-off runs and backward compatibility.
 """

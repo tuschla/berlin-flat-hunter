@@ -1,64 +1,83 @@
-# Deploy: native systemd (no Docker)
+# Deploy: TrueNAS SCALE Custom App
 
-We run the hunter directly on this host via `uv run`, supervised by systemd.
-Docker is *not* used here; the `docker-compose.yml` and `Dockerfile` in the repo
-root are just an alternative deploy path we don't take.
+The hunter runs as a TrueNAS Custom App (Docker Compose) named `flathunter`.
+`deploy/truenas-app.yaml` is the complete compose file, pasted into
+Apps > Discover > Custom App > Install via YAML. The image
+`ghcr.io/tuschla/berlin-flat-hunter` (`:latest` plus `:<git sha>`) is built by
+`.github/workflows/image.yml` on every push to `main`. It contains code only;
+config and state come from datasets. (This replaces the old systemd units in an
+Incus container.)
 
-## Shared scrape, many profiles — one service
+## Shared scrape, many profiles: one process
 
-`bfh-hunter.service` runs a **single** process (`main.py --hunter hunter.yaml`)
+The `hunter` service runs a **single** process (`main.py --hunter /app/hunter.yaml`)
 that crawls every source **once per cycle** and fans the results out to every
 profile listed in `hunter.yaml`. This replaces the old per-profile services
 (`bfh-single` / `bfh-wg`), which each ran a full duplicate crawl of the same
 sites.
 
-- `hunter.yaml` — global settings + the list of profiles (see `hunter.yaml.example`).
-- `profiles/*.yaml` — one file per profile (unchanged format). Each keeps its own
+- `hunter.yaml`: global settings + the list of profiles (see `hunter.yaml.example`).
+- `profiles/*.yaml`: one file per profile (unchanged format). Each keeps its own
   filters, telegram, auto-apply, dedup DB, stats and geo settings.
 - Shared crawl state (incl. the single `schema_monitor.json` the watchdog reads)
   lives next to `global.database_location` in `hunter.yaml`. Per-profile dedup
-  DBs still live under `data/<profile>/`.
+  DBs live under `data/<profile>/`.
 
-Add a profile = add one line under `profiles:` in `hunter.yaml`; the crawl cost
-stays flat.
+Add a profile = add its YAML to `config/profiles/` and one line under
+`profiles:` in `hunter.yaml`; the crawl cost stays flat.
 
 ## Layout
 
-- `bfh-hunter.service` — the shared-scrape hunter (all profiles)
-- `bfh-watchdog.service` + `bfh-watchdog.timer` — crawler triage (see below)
+| Container path | Host path | Mode |
+|---|---|---|
+| `/app/hunter.yaml` | `/mnt/nvme0/apps/flathunter/config/hunter.yaml` | ro |
+| `/app/profiles/` | `/mnt/nvme0/apps/flathunter/config/profiles/` | ro |
+| `/data` (`/app/data` is a symlink to it) | `/mnt/nvme0/apps/flathunter/data` | rw |
 
-## One-time install
+Both datasets belong to `568:568` (TrueNAS `apps`), the uid the containers run
+as. Config files are `0600` because they hold Telegram tokens, the addy.io key,
+IMAP credentials and applicant PII. Every `database_location` must point at
+`/app/data/...` (e.g. `/app/data/db.sqlite`, `/app/data/single/db.sqlite`).
+`HOME` is `/data/home` (undetected-chromedriver caches its patched driver there).
 
-```bash
-# Deps already installed via `uv sync` — re-run if pyproject.toml changes.
-cp hunter.yaml.example hunter.yaml   # then edit: global settings + profiles list
-sudo install -m 644 deploy/bfh-hunter.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bfh-hunter.service
-```
+Services, both from the same image:
+
+- `hunter`: the shared-scrape loop. `mem_limit: 1g`, `shm_size: 1g` (Chrome).
+- `watchdog`: `supercronic -passthrough-logs /app/deploy/crontab`, `mem_limit: 256m`.
+  It runs every job through `deploy/run-job.sh`, and its healthcheck
+  (`run-job.sh --healthy`) goes unhealthy when a job is stale.
+
+## Schedule (`deploy/crontab`, Europe/Berlin)
+
+| When | Job | Stale after |
+|---|---|---|
+| every 15 min | `watchdog`: `python scripts/crawler_watchdog.py` | 1 h |
+| every 30 min | `run-job.sh --check-stale` | – |
 
 ## Operate
 
-```bash
-sudo journalctl -u bfh-hunter -f            # tail
-sudo systemctl status bfh-hunter            # state
-sudo systemctl restart bfh-hunter           # after editing hunter.yaml or a profile
-sudo systemctl stop bfh-hunter              # stop
-```
+- Logs: Apps > flathunter > Logs (choose `hunter` or `watchdog`). Everything
+  goes to stdout; cron job lines are prefixed `[watchdog]`.
+- Shell: Apps > flathunter > Shell. Then, e.g.,
+  `python scripts/crawler_watchdog.py --dry-run` or
+  `python scripts/probe_url.py <url>`.
+- Config change: edit the files in the config dataset, then Apps > flathunter > Restart.
+- Update to the newest image: Apps > flathunter > Update (or Redeploy).
 
 ## Dry-test before going live (recommended once)
 
 Auto-apply mode is per source via `auto_apply.send_modes` (`off` / `dry_run` /
 `live`); the legacy global `auto_apply.dry_run` is the fallback. To do a single
-fill-but-don't-submit cycle for one profile:
+fill-but-don't-submit cycle, set the profile's auto_apply to dry_run and run
+from the `hunter` shell:
 
 ```bash
-cd /root/berlin-flat-hunter
-# temporarily set the profile's auto_apply to dry_run, then:
-/root/.local/bin/uv run python main.py --config profiles/single.yaml --once
+python main.py --config /app/profiles/single.yaml --once
 # or one shared cycle across all profiles:
-/root/.local/bin/uv run python main.py --hunter hunter.yaml --once
+python main.py --hunter /app/hunter.yaml --once
 ```
+
+Stop the app's `hunter` loop first if you don't want duplicate notifications.
 
 ## Telegram
 
@@ -69,40 +88,24 @@ cd /root/berlin-flat-hunter
 - **Crawler-down** alerts (shared crawl) go to `hunter.yaml`'s `global.telegram`
   via `global.monitoring.alert_via_notifiers: true`.
 
-## Crawler watchdog (auto-triage)
+## Crawler watchdog (alert-only)
 
-When the shared monitor flags a crawler as down (0 results for 3+ cycles), a
-timer-driven watchdog launches a **read-only** headless Claude Code run to
-diagnose *why* — dead selector, bot-block, or a legitimately empty site — and
-pushes the diagnosis plus a one-command fix to the `global.telegram` bot. It
-never edits or commits: a human runs the suggested fix. It now reads the single
-shared `schema_monitor.json` and keys triage per crawler. See
-`scripts/crawler_watchdog.py`.
+`scripts/crawler_watchdog.py` is a oneshot that cron runs every 15 min:
 
-```bash
-sudo install -m 644 deploy/bfh-watchdog.service deploy/bfh-watchdog.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now bfh-watchdog.timer
-```
+- When the shared monitor flags a crawler as down (0 results for 3+ cycles), it
+  alerts `global.telegram` and, if `NTFY_URL` is set, the ntfy topic. One alert
+  per *down episode*: a crawler that recovers and breaks again alerts again.
+- It also alerts when no crawl cycle has completed for 30 min
+  (`BFH_STALL_AFTER`, seconds). That means the hunter is alive but stuck
+  mid-cycle, which freezes the per-crawler health the down check reads. One
+  alert per stall.
+- De-dup state: `data/watchdog_state.json`. Manual runs: `--dry-run` (print,
+  don't send) or `--force` (ignore de-dup).
 
-- Runs 5 min after boot, then every 15 min. De-dups to one triage per *down
-  episode*; re-triages a still-broken crawler at most once per 24h
-  (`BFH_RETRIGGER_COOLDOWN`).
-- Also alerts (plain Telegram, no triage) when no crawl cycle has completed for
-  30 min (`BFH_STALL_AFTER`, seconds): the hunter is alive but stuck mid-cycle,
-  which freezes the per-crawler health the down check reads. Same de-dup and
-  cooldown, keyed per stall.
-- Manual: `python scripts/crawler_watchdog.py --dry-run` (print, don't act) or
-  `--force` (ignore de-dup). Trigger a real run now: `sudo systemctl start bfh-watchdog.service`.
-- The Claude run is sandboxed via `--allowedTools` (Read/Grep/Glob/WebFetch +
-  read-only Bash) — no Edit/Write/bypass. Tunables via `Environment=` in the
-  unit: `BFH_CLAUDE_TIMEOUT`, `BFH_RETRIGGER_COOLDOWN`, `BFH_CLAUDE_BIN`.
+## Job alerts (`deploy/run-job.sh`)
 
-## Uninstall
-
-```bash
-sudo systemctl disable --now bfh-hunter bfh-watchdog.timer
-sudo rm /etc/systemd/system/bfh-hunter.service \
-        /etc/systemd/system/bfh-watchdog.service /etc/systemd/system/bfh-watchdog.timer
-sudo systemctl daemon-reload
-```
+- A failed job (non-zero exit) POSTs `flathunter: <job> failed (rc=N)` with the
+  last 40 output lines to `NTFY_URL`.
+- `--check-stale` alerts once per episode when a job has not succeeded within its
+  max age (`/data/.status/<job>.ok` / `.max` / `.alerted`).
+- A job is never stale before the container has been up for its max age.

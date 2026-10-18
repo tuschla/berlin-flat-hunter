@@ -1,4 +1,4 @@
-"""Tests for the crawler watchdog's pure decision logic (no Claude/Telegram)."""
+"""Tests for the crawler watchdog's decision logic and alert senders."""
 import json
 import os
 import sys
@@ -37,35 +37,29 @@ class TestDownDetection(unittest.TestCase):
         self.assertEqual(wd.down_crawlers({}), [])
 
 
-class TestShouldTrigger(unittest.TestCase):
+class TestShouldAlert(unittest.TestCase):
 
     def setUp(self):
-        self.now = time.time()
         self.health = {"last_success_ts": 1000.0, "consecutive_alerts": 1}
 
-    def test_new_episode_triggers(self):
+    def test_new_episode_alerts(self):
         # Never handled this crawler before.
-        self.assertTrue(wd.should_trigger({}, "single:KA", self.health, self.now, False))
+        self.assertTrue(wd.should_alert({}, "shared:Wbm", self.health, False))
 
-    def test_same_episode_within_cooldown_skips(self):
-        state = {"single:KA": {"handled_success_ts": 1000.0, "trigger_ts": self.now - 60}}
-        self.assertFalse(wd.should_trigger(state, "single:KA", self.health, self.now, False))
-
-    def test_same_episode_past_cooldown_retriggers(self):
-        old = self.now - (wd.RETRIGGER_COOLDOWN + 10)
-        state = {"single:KA": {"handled_success_ts": 1000.0, "trigger_ts": old}}
-        self.assertTrue(wd.should_trigger(state, "single:KA", self.health, self.now, False))
+    def test_same_episode_alerts_once(self):
+        state = {"shared:Wbm": {"handled_success_ts": 1000.0, "alert_ts": time.time()}}
+        self.assertFalse(wd.should_alert(state, "shared:Wbm", self.health, False))
 
     def test_recovered_then_down_again_is_new_episode(self):
         # We handled the previous episode (last_success 1000); the crawler has
-        # since succeeded (last_success now 2000) and broken again → re-triage.
-        state = {"single:KA": {"handled_success_ts": 1000.0, "trigger_ts": self.now - 60}}
+        # since succeeded (last_success now 2000) and broken again → alert again.
+        state = {"shared:Wbm": {"handled_success_ts": 1000.0, "alert_ts": time.time()}}
         fresh = {"last_success_ts": 2000.0, "consecutive_alerts": 1}
-        self.assertTrue(wd.should_trigger(state, "single:KA", fresh, self.now, False))
+        self.assertTrue(wd.should_alert(state, "shared:Wbm", fresh, False))
 
-    def test_force_always_triggers(self):
-        state = {"single:KA": {"handled_success_ts": 1000.0, "trigger_ts": self.now}}
-        self.assertTrue(wd.should_trigger(state, "single:KA", self.health, self.now, True))
+    def test_force_always_alerts(self):
+        state = {"shared:Wbm": {"handled_success_ts": 1000.0, "alert_ts": time.time()}}
+        self.assertTrue(wd.should_alert(state, "shared:Wbm", self.health, True))
 
 
 class TestStallAlert(unittest.TestCase):
@@ -83,11 +77,14 @@ class TestStallAlert(unittest.TestCase):
         with open(self.monitor, "w") as f:
             json.dump({"Howoge": {"consecutive_empty": 0, "consecutive_alerts": 0}}, f)
         self.sent: list[str] = []
+        self.ntfy: list[tuple[str, str]] = []
         for patcher in (
             mock.patch.object(wd, "HUNTER_YAML", hunter_yaml),
             mock.patch.object(wd, "WATCHDOG_STATE", os.path.join(self.tmp.name, "wd.json")),
             mock.patch.object(wd, "send_telegram",
                               lambda token, ids, text: self.sent.append(text) or True),
+            mock.patch.object(wd, "send_ntfy",
+                              lambda title, text: self.ntfy.append((title, text)) or True),
             mock.patch.object(sys, "argv", ["crawler_watchdog.py"]),
         ):
             patcher.start()
@@ -105,9 +102,26 @@ class TestStallAlert(unittest.TestCase):
     def test_stalled_cycle_alerts_once_per_episode(self):
         self._last_cycle_ago(wd.STALL_AFTER + 60)
         wd.main()
-        wd.main()  # next timer tick, still stuck on the same cycle
+        wd.main()  # next cron tick, still stuck on the same cycle
         self.assertEqual(len(self.sent), 1)
-        self.assertIn("bfh-hunter", self.sent[0])
+        self.assertIn("Restart", self.sent[0])
+        self.assertIn(wd.DEZSO_NOTE, self.sent[0])
+        # Same alert text goes to ntfy, without the note for Dezső.
+        self.assertEqual(len(self.ntfy), 1)
+        title, text = self.ntfy[0]
+        self.assertIn("stalled", title)
+        self.assertTrue(self.sent[0].startswith(text))
+        self.assertNotIn(wd.DEZSO_NOTE, text)
+
+    def test_down_crawler_alerts_once(self):
+        with open(self.monitor, "w") as f:
+            json.dump({"Wbm": {"consecutive_empty": 5, "consecutive_alerts": 1,
+                               "last_success_ts": 1000.0}}, f)
+        wd.main()
+        wd.main()
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Wbm", self.sent[0])
+        self.assertEqual(self.ntfy[0][0], "flathunter: crawler Wbm down")
 
     def test_new_stall_after_recovery_alerts_again(self):
         self._last_cycle_ago(wd.STALL_AFTER + 600)
@@ -128,17 +142,6 @@ class TestHelpers(unittest.TestCase):
         self.assertTrue(ago.endswith("m"))
         self.assertIn("1h", ago)
 
-    def test_build_prompt_contains_key_facts(self):
-        prompt = wd.build_prompt(
-            "single", "Kleinanzeigen",
-            {"last_success_ts": time.time() - 600, "consecutive_empty": 12},
-            ["https://www.kleinanzeigen.de/s-wohnung-mieten/berlin/"],
-        )
-        self.assertIn("Kleinanzeigen", prompt)
-        self.assertIn("READ-ONLY", prompt)
-        self.assertIn("kleinanzeigen.py", prompt)
-        self.assertIn("kleinanzeigen.de/s-wohnung-mieten", prompt)
-
     def test_send_telegram_without_creds_returns_false(self):
         self.assertFalse(wd.send_telegram("", [], "hi"))
         self.assertFalse(wd.send_telegram("token", [], "hi"))
@@ -147,20 +150,32 @@ class TestHelpers(unittest.TestCase):
         self.assertIn("Dezső", wd.DEZSO_NOTE)
         self.assertIn("Leon", wd.DEZSO_NOTE)
 
-    def test_prompt_asks_for_italian_output(self):
-        prompt = wd.build_prompt("wg", "Wbm",
-                                 {"last_success_ts": 0, "consecutive_empty": 5}, [])
-        self.assertIn("ITALIAN", prompt)
 
-    def test_prompt_tells_triage_to_use_box_side_probe(self):
-        prompt = wd.build_prompt("single", "Kleinanzeigen",
-                                 {"last_success_ts": 0, "consecutive_empty": 9}, [])
-        self.assertIn("probe_url.py", prompt)
-        self.assertIn("WebFetch", prompt)  # warns about the egress trap
+class TestSendNtfy(unittest.TestCase):
 
-    def test_probe_is_allowlisted_for_triage(self):
-        self.assertIn("Bash(.venv/bin/python scripts/probe_url.py:*)",
-                      wd.CLAUDE_ALLOWED_TOOLS)
+    def test_noop_without_ntfy_url(self):
+        with mock.patch.object(wd, "NTFY_URL", ""), \
+                mock.patch.object(wd.urllib.request, "urlopen") as urlopen:
+            self.assertFalse(wd.send_ntfy("t", "body"))
+        urlopen.assert_not_called()
+
+    def test_posts_title_and_body(self):
+        resp = mock.MagicMock(status=200)
+        resp.__enter__.return_value = resp
+        with mock.patch.object(wd, "NTFY_URL", "https://ntfy.example/topic"), \
+                mock.patch.object(wd.urllib.request, "urlopen", return_value=resp) as urlopen:
+            self.assertTrue(wd.send_ntfy("flathunter: crawler Wbm down", "il crawler Wbm…"))
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.full_url, "https://ntfy.example/topic")
+        self.assertEqual(req.get_header("Title"), "flathunter: crawler Wbm down")
+        self.assertEqual(req.get_header("Tags"), "warning")
+        self.assertEqual(req.data, "il crawler Wbm…".encode())
+
+    def test_unreachable_ntfy_does_not_raise(self):
+        with mock.patch.object(wd, "NTFY_URL", "https://ntfy.example/topic"), \
+                mock.patch.object(wd.urllib.request, "urlopen",
+                                  side_effect=wd.urllib.error.URLError("down")):
+            self.assertFalse(wd.send_ntfy("t", "body"))
 
 
 class TestProbeUrl(unittest.TestCase):

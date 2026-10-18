@@ -1,29 +1,24 @@
 #!/usr/bin/env python3
-"""Crawler watchdog — triage a down crawler with a read-only Claude run.
+"""Crawler watchdog — alert when a crawler is down or the hunter has stalled.
 
 The SchemaMonitor already detects when a crawler stops returning results and
 persists per-crawler health to ``<state_dir>/schema_monitor.json``. This
-watchdog polls that state (via a systemd timer, every ~15 min), and when a
-crawler is flagged *down* it launches a **read-only** headless Claude Code run
-to diagnose *why* — dead selector, bot-block, or a legitimately empty site —
-and pushes the diagnosis to the same Telegram bot the alerts already use.
+oneshot watchdog reads that state (run every 15 min by supercronic in the
+TrueNAS app's ``watchdog`` service, see ``deploy/crontab``) and, when a crawler
+is flagged *down*, alerts the ``global.telegram`` bot from hunter.yaml and,
+when ``NTFY_URL`` is set, the ntfy topic. Alert-only: diagnosis and fixes are
+done by a human (``scripts/probe_url.py`` checks whether this host's IP is
+blocked).
 
-Deliberately read-only: the Claude run gets a restricted ``--allowedTools`` set
-(no Edit/Write, no arbitrary shell, no bypass), so it investigates and proposes
-a one-command fix for a human to run, but never mutates the repo or pushes.
-That keeps a person in the loop for every change and sidesteps the
-unattended-agent risk of an auto-fixer.
-
-De-dup: one triage per *down episode*. An episode is keyed by the crawler's
+De-dup: one alert per *down episode*. An episode is keyed by the crawler's
 ``last_success_ts`` (which only advances on a successful crawl), so a crawler
-that recovers and breaks again is triaged afresh, while one that stays broken is
-re-triaged at most once per ``RETRIGGER_COOLDOWN``.
+that recovers and breaks again alerts afresh, while one that stays broken
+alerts once.
 
 Stall check: the hunter rewrites schema_monitor.json every cycle (~6 min). If
 it is older than ``STALL_AFTER`` (env ``BFH_STALL_AFTER``, default 30 min) the
 process is alive but stuck mid-cycle — per-crawler health is frozen then, so
-the down-crawler check can't see it. That sends a plain Telegram alert (no
-Claude triage), once per stall episode with the same re-nag cooldown.
+the down-crawler check can't see it. That alerts once per stall episode.
 
 Run manually:  python scripts/crawler_watchdog.py --dry-run   # print, don't act
                python scripts/crawler_watchdog.py --force     # ignore de-dup
@@ -33,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import subprocess
 import sys
 import time
 import urllib.error
@@ -43,10 +37,8 @@ from datetime import datetime, timezone
 
 import yaml
 
-REPO_DIR = os.environ.get("BFH_REPO", "/root/berlin-flat-hunter")
-CLAUDE_BIN = os.environ.get("BFH_CLAUDE_BIN", "/usr/bin/claude")
-CLAUDE_TIMEOUT = int(os.environ.get("BFH_CLAUDE_TIMEOUT", str(20 * 60)))  # seconds
-RETRIGGER_COOLDOWN = int(os.environ.get("BFH_RETRIGGER_COOLDOWN", str(24 * 3600)))
+REPO_DIR = os.environ.get("BFH_REPO", "/app")
+NTFY_URL = os.environ.get("NTFY_URL", "")
 # The hunter rewrites schema_monitor.json at the end of every crawl cycle
 # (~6 min apart). A file older than this means the process is alive but no
 # cycle is completing (e.g. a crawler stuck in a loop) — per-crawler health
@@ -55,31 +47,14 @@ STALL_AFTER = int(os.environ.get("BFH_STALL_AFTER", str(30 * 60)))  # seconds
 STALL_KEY = "hunter:stall"
 WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 
-# The Telegram bot delivers to Dezső's chat, not the maintainer's. Every alert
-# carries a note (in Italian) asking Dezső to get in touch with Leon.
+# The Telegram bot delivers to Dezső's chat, not the maintainer's. Every
+# Telegram alert carries a note (in Italian) asking Dezső to get in touch with Leon.
 DEZSO_NOTE = "📩 Dezső, se stai leggendo questo messaggio, dovresti contattare Leon."
 
 # Shared-scrape deployment: ONE process crawls every source once per cycle, so
 # there is ONE schema monitor (not one per profile) and crawler-down alerts go
 # to the shared channel configured in hunter.yaml's `global.telegram`.
 HUNTER_YAML = os.path.join(REPO_DIR, "hunter.yaml")
-
-# Read-only tool sandbox for the triage run. No Edit/Write/bypass — everything
-# not listed is auto-denied in headless mode, so the run can only investigate.
-# Deliberately excludes tools that can write to disk: `curl -o` and `sed -n
-# 'w …'` would break the non-mutating guarantee, so live pages go through
-# WebFetch (no filesystem access) and file viewing through the Read tool.
-CLAUDE_ALLOWED_TOOLS = [
-    "Read", "Grep", "Glob", "WebFetch",
-    # Box-side read-only fetch probe: lets the triage tell a real IP block from a
-    # headless-browser problem. WebFetch egresses via Anthropic, not this host,
-    # so it can't answer "is *our* IP blocked?" — this can. Fixed script, GET +
-    # print only, so allowing arbitrary args after it is safe.
-    "Bash(.venv/bin/python scripts/probe_url.py:*)",
-    "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
-    "Bash(git status:*)", "Bash(ls:*)", "Bash(grep:*)", "Bash(rg:*)",
-    "Bash(head:*)", "Bash(wc:*)",
-]
 
 
 def log(msg: str) -> None:
@@ -135,28 +110,13 @@ def last_cycle_ts(monitor_path: str) -> float:
         return 0.0
 
 
-def hunter_telegram_and_urls(hunter_cfg: dict | None = None) -> tuple[str, list[str], list[str]]:
-    """Shared alert channel + the union of all crawled URLs, from hunter.yaml.
-
-    Alerts for the shared crawl go to ``global.telegram``. URLs are the global
-    extras plus every profile's ``urls`` (deduped), so the triage prompt can list
-    the down crawler's real target URL.
-    """
+def hunter_telegram(hunter_cfg: dict | None = None) -> tuple[str, list[str]]:
+    """Shared alert channel (``global.telegram``) from hunter.yaml."""
     cfg = hunter_cfg if hunter_cfg is not None else _load_hunter_cfg()
-    g = cfg.get("global", {}) or {}
-    tg = g.get("telegram", {}) or {}
+    tg = (cfg.get("global", {}) or {}).get("telegram", {}) or {}
     token = tg.get("bot_token") or ""
     ids = [str(i) for i in (tg.get("receiver_ids") or [])]
-    urls = list(g.get("urls") or [])
-    for p in cfg.get("profiles", []) or []:
-        try:
-            pc = yaml.safe_load(open(_abs(p))) or {}
-            urls += list(pc.get("urls") or [])
-        except (FileNotFoundError, ValueError):
-            continue
-    seen: set[str] = set()
-    urls = [u for u in urls if not (u in seen or seen.add(u))]
-    return token, ids, urls
+    return token, ids
 
 
 def send_telegram(token: str, ids: list[str], text: str) -> bool:
@@ -180,6 +140,26 @@ def send_telegram(token: str, ids: list[str], text: str) -> bool:
     return ok
 
 
+def send_ntfy(title: str, text: str) -> bool:
+    """POST the alert to the ntfy topic in ``NTFY_URL``; no-op when unset."""
+    if not NTFY_URL:
+        return False
+    try:
+        req = urllib.request.Request(NTFY_URL, data=text.encode(),
+                                     headers={"Title": title, "Tags": "warning"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status == 200
+    except (OSError, ValueError) as exc:  # URLError, timeouts, bad URL
+        log(f"ntfy send failed: {exc}")
+        return False
+
+
+def alert(token: str, ids: list[str], title: str, text: str) -> None:
+    """Send one alert to Telegram (with the note for Dezső) and to ntfy."""
+    send_telegram(token, ids, f"{text}\n\n{DEZSO_NOTE}")
+    send_ntfy(title, text)
+
+
 def human_ago(ts: float) -> tuple[str, str]:
     if not ts:
         return "never", "?"
@@ -190,73 +170,20 @@ def human_ago(ts: float) -> tuple[str, str]:
     return when.strftime("%Y-%m-%d %H:%M UTC"), ago
 
 
-def build_prompt(profile: str, crawler: str, health: dict, urls: list[str]) -> str:
-    last_success, ago = human_ago(float(health.get("last_success_ts", 0)))
-    empty = int(health.get("consecutive_empty", 0))
-    url_lines = "\n".join(f"  - {u}" for u in urls) or "  (none listed)"
-    return f"""You are triaging a DOWN web scraper in the berlin-flat-hunter repo (a flathunter fork). Working dir: {REPO_DIR}.
-
-The crawler **{crawler}** (profile: {profile}) has returned ZERO results for {empty} consecutive crawls. Last successful crawl: {last_success} ({ago} ago). The health monitor has flagged it as down.
-
-Diagnose WHY — READ-ONLY. Do not edit files; you have no write tools. The three likely causes:
-1. Dead/changed CSS selector or page structure (site redesign) — the crawler's selectors no longer match the live HTML.
-2. Bot-blocking / captcha / IP ban — the site returns a challenge or an empty listing container to datacenter IPs.
-3. Legitimately empty — the site genuinely shows no offers right now (not a bug).
-
-Steps:
-- Read the crawler source: berlin_flat_hunter/crawlers/{crawler.lower()}.py (follow into its flathunter base class if it subclasses one).
-- CRITICAL — is our IP actually blocked? Run the box-side probe (it fetches from THIS host's real egress):
-    .venv/bin/python scripts/probe_url.py <the crawler's target URL>
-  `HTTP 200` with a listing marker (e.g. srchrslt-adtable) → the site serves US fine: it is NOT an IP block, the problem is the browser/driver path or a selector. A captcha/block marker or a non-200 → a real block. Do NOT infer an IP block from a WebFetch timeout: WebFetch egresses via Anthropic's network, not this host, so it cannot tell you whether our crawler's IP is blocked. Trust the probe over WebFetch for that question.
-- Compare the fetched page's structure to the selectors in the code. The profile's target URLs:
-{url_lines}
-- Decide which cause it is, with concrete evidence.
-
-Output ONLY a concise Telegram-ready report, written IN ITALIAN, in PLAIN TEXT, under 350 words, in exactly this shape (keep the Italian field labels):
-
-🔎 Diagnosi {crawler} ({profile})
-Causa: <una riga — selettore / blocco-bot / sito vuoto>
-Prove: <1-3 righe brevi>
-Soluzione: <l'azione più utile; se è una modifica al codice, indica il selettore/metodo esatto e il nuovo valore; se non è risolvibile via codice, dillo>
-Comando: claude "fix the {crawler} crawler: <modifica specifica>"    (ometti questa riga se non serve una modifica al codice)
-
-Write everything in Italian. No preamble, no markdown headers, nothing else. (The `Comando:` line stays in English since it is a command to run verbatim.)"""
-
-
-def run_claude_triage(prompt: str) -> tuple[bool, str]:
-    cmd = [CLAUDE_BIN, "-p", prompt, "--allowedTools", *CLAUDE_ALLOWED_TOOLS]
-    try:
-        proc = subprocess.run(
-            cmd, cwd=REPO_DIR, capture_output=True, text=True, timeout=CLAUDE_TIMEOUT,
-        )
-    except subprocess.TimeoutExpired:
-        return False, f"(Claude triage timed out after {CLAUDE_TIMEOUT}s)"
-    except OSError as exc:
-        return False, f"(could not launch claude: {exc})"
-    out = (proc.stdout or "").strip()
-    if proc.returncode != 0:
-        err = (proc.stderr or "").strip()[:400]
-        return False, out or f"(claude exited {proc.returncode}: {err})"
-    return True, out
-
-
-def should_trigger(wd_state: dict, key: str, health: dict, now: float, force: bool) -> bool:
+def should_alert(wd_state: dict, key: str, health: dict, force: bool) -> bool:
+    """True for a new down episode (``last_success_ts`` differs from the one we
+    last alerted on) or when forced."""
     if force:
         return True
-    prev = wd_state.get(key, {})
-    # New down episode: last_success_ts differs from the one we last handled.
-    if prev.get("handled_success_ts") != health.get("last_success_ts"):
-        return True
-    # Same episode, still down: re-nag at most once per cooldown.
-    return (now - float(prev.get("trigger_ts", 0))) >= RETRIGGER_COOLDOWN
+    return wd_state.get(key, {}).get("handled_success_ts") != health.get("last_success_ts")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Triage down crawlers via read-only Claude")
+    ap = argparse.ArgumentParser(description="Alert on down crawlers and a stalled hunter")
     ap.add_argument("--dry-run", action="store_true",
-                    help="print what would happen; do not launch Claude or send Telegram")
+                    help="print what would happen; do not send alerts")
     ap.add_argument("--force", action="store_true",
-                    help="ignore de-dup state and triage every currently-down crawler")
+                    help="ignore de-dup state and alert for every current problem")
     args = ap.parse_args()
 
     wd_state = load_json(WATCHDOG_STATE)
@@ -264,7 +191,7 @@ def main() -> int:
     any_down = False
 
     hunter_cfg = _load_hunter_cfg()
-    token, ids, urls = hunter_telegram_and_urls(hunter_cfg)
+    token, ids = hunter_telegram(hunter_cfg)
     monitor_path = shared_monitor_path(hunter_cfg)
     state = load_json(monitor_path)
 
@@ -272,51 +199,40 @@ def main() -> int:
     if last_tick and now - last_tick >= STALL_AFTER:
         any_down = True
         when, ago = human_ago(last_tick)
-        # One alert per stall episode: the frozen mtime identifies the episode,
-        # so should_trigger's episode/cooldown logic applies unchanged.
+        # One alert per stall episode: the frozen mtime identifies the episode.
         tick = {"last_success_ts": last_tick}
-        if not should_trigger(wd_state, STALL_KEY, tick, now, args.force):
+        if not should_alert(wd_state, STALL_KEY, tick, args.force):
             log(f"{STALL_KEY}: no crawl cycle completed for {ago} — already alerted this episode")
         elif args.dry_run:
             log(f"{STALL_KEY}: no crawl cycle completed for {ago} (last {when}); "
-                f"DRY-RUN: would Telegram {ids or '[]'}")
+                f"DRY-RUN: would alert Telegram {ids or '[]'} and ntfy={bool(NTFY_URL)}")
         else:
             log(f"{STALL_KEY}: no crawl cycle completed for {ago} (last {when}); alerting")
-            send_telegram(token, ids, (
+            alert(token, ids, f"flathunter: hunter stalled for {ago}", (
                 f"🔴 Watchdog: il hunter non completa un ciclo di scansione da {ago} "
                 f"(ultimo: {when}) — probabilmente bloccato. Nessun annuncio viene "
-                f"cercato finché non riparte (sudo systemctl restart bfh-hunter)."
-                f"\n\n{DEZSO_NOTE}"))
-            wd_state[STALL_KEY] = {"handled_success_ts": last_tick, "trigger_ts": now}
+                f"cercato finché non riparte (TrueNAS: Apps > flathunter > Restart)."))
+            wd_state[STALL_KEY] = {"handled_success_ts": last_tick, "alert_ts": now}
 
     for crawler, health in down_crawlers(state):
         any_down = True
         key = f"shared:{crawler}"
-        if not should_trigger(wd_state, key, health, now, args.force):
-            log(f"{key}: down but already triaged this episode — skipping")
+        if not should_alert(wd_state, key, health, args.force):
+            log(f"{key}: down but already alerted this episode — skipping")
             continue
-        last_success, ago = human_ago(float(health.get("last_success_ts", 0)))
+        _, ago = human_ago(float(health.get("last_success_ts", 0)))
         empty = int(health.get("consecutive_empty", 0))
-        log(f"{key}: down — {empty} empty crawls, last success {ago} ago; running triage")
+        log(f"{key}: down — {empty} empty crawls, last success {ago} ago; alerting")
 
         if args.dry_run:
-            log(f"DRY-RUN: would Telegram {ids or '[]'} and launch:\n"
-                f"  {CLAUDE_BIN} -p <prompt> --allowedTools {' '.join(CLAUDE_ALLOWED_TOOLS)}")
+            log(f"DRY-RUN: would alert Telegram {ids or '[]'} and ntfy={bool(NTFY_URL)}")
             continue
 
-        header = (f"🔴 Watchdog: il crawler {crawler} sembra non rispondere — "
-                  f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
-                  f"Avvio della diagnosi con Claude…")
-        send_telegram(token, ids, f"{header}\n\n{DEZSO_NOTE}")
-        prompt = build_prompt("shared", crawler, health, urls)
-        ok, report = run_claude_triage(prompt)
-        report = report or "(nessun output dalla diagnosi)"
-        prefix = "" if ok else "⚠️ diagnosi incompleta —\n"
-        send_telegram(token, ids, f"{prefix}{report[:3400]}\n\n{DEZSO_NOTE}")
-        log(f"{key}: triage {'ok' if ok else 'FAILED'}, {len(report)} chars sent")
-
-        wd_state[key] = {"handled_success_ts": health.get("last_success_ts"),
-                         "trigger_ts": now, "last_ok": ok}
+        alert(token, ids, f"flathunter: crawler {crawler} down", (
+            f"🔴 Watchdog: il crawler {crawler} sembra non rispondere — "
+            f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
+            f"Log: TrueNAS > Apps > flathunter > Logs."))
+        wd_state[key] = {"handled_success_ts": health.get("last_success_ts"), "alert_ts": now}
 
     if not args.dry_run:
         os.makedirs(os.path.dirname(WATCHDOG_STATE), exist_ok=True)

@@ -65,69 +65,40 @@ Single-profile mode still works for one-off runs:
 python main.py --config profiles/cheap.yaml --once
 ```
 
-## Docker
+## Running on TrueNAS
 
-```bash
-docker build -t berlin-flat-hunter .
-docker run -d --name bfh \
-    -v "$PWD/config.yaml:/config/config.yaml:ro" \
-    -v "$PWD/data:/data" \
-    berlin-flat-hunter
-```
+Production runs as the TrueNAS SCALE Custom App `flathunter`. The full details
+are in [`deploy/README.md`](deploy/README.md).
 
-The image bundles Chromium + chromedriver so Kleinanzeigen crawling and all
-Selenium-based auto-apply work out of the box.
+- **Image/CI:** `.github/workflows/image.yml` builds the `Dockerfile` on every
+  push to `main` and pushes `ghcr.io/tuschla/berlin-flat-hunter:latest` plus
+  `:<git sha>`. The image holds code only (Python 3.13, Chromium + chromedriver,
+  supercronic) and runs as uid:gid `568:568`.
+- **App:** `deploy/truenas-app.yaml`, installed via Apps > Discover > Custom App >
+  Install via YAML. It has two services from that image: `hunter` (the
+  `--hunter` loop) and `watchdog` (supercronic running `deploy/crontab`).
+- **Datasets:** `/mnt/nvme0/apps/flathunter/data` → `/data` (state; `/app/data`
+  links to it) and `/mnt/nvme0/apps/flathunter/config` (read-only, files `0600`).
+- **Config files:** `config/hunter.yaml` → `/app/hunter.yaml` and
+  `config/profiles/*.yaml` → `/app/profiles/`. Every `database_location` points
+  at `/app/data/...`.
+- **Schedule:**
 
-### Hands-off auto-apply via persistent profile + noVNC
+  | When | Job | Stale after |
+  |---|---|---|
+  | always | `hunter`: `python main.py --hunter /app/hunter.yaml` (sleeps `loop.sleeping_time` between crawls) | – |
+  | every 15 min | `watchdog`: `scripts/crawler_watchdog.py` (crawler down / hunter stalled) | 1 h |
+  | every 30 min | `run-job.sh --check-stale` | – |
 
-Sites with reCAPTCHA / bot detection (Gewobag → wohnungshelden, Kleinanzeigen)
-treat warm Chrome profiles much more leniently than fresh headless instances.
-The `runtime-vnc` Dockerfile target runs Chrome **headed** inside Xvfb, exposes
-a noVNC web client on port 6080 for first-time login + occasional CAPTCHA
-solving, and persists the Chrome profile dir on a volume so cookies/login
-state survive container restarts.
-
-```bash
-# Build the VNC-flavored image
-docker build --target runtime-vnc -t berlin-flat-hunter:vnc .
-
-# Or via compose (the `vnc` service in docker-compose.yml is preconfigured)
-docker compose up -d vnc
-```
-
-**First-time login workflow:**
-
-1. Open `http://localhost:6080/vnc.html` in any browser → you'll see a Chrome
-   window inside the container.
-2. Visit each site you'll auto-apply on (Gewobag listing, Kleinanzeigen, …),
-   log in, solve any CAPTCHA prompts. Browse a few real pages so the session
-   looks human-warmed.
-3. Cookies + LocalStorage land in `./data/vnc/chrome-profile/`.
-4. The hunter loop is already running in the same container; subsequent
-   `apply()` calls reuse your warm profile. Most sites stop challenging you.
-
-**When a CAPTCHA still appears:** the existing `[MANUAL APPLY]` notifier ping
-fires (telegram et al). Tap it → open the noVNC tab → solve in 5 seconds → the
-next cycle picks up.
-
-**Limits:** sessions expire after weeks; you'll occasionally re-login. The
-container needs `shm_size: 2gb` to stop Chrome OOMing on `/dev/shm`. Keep
-port 6080 bound to localhost (the compose file does this) — don't expose it
-to the LAN unless you set a noVNC password.
-
-### Multi-profile via docker-compose
-
-`docker-compose.yml` ships with two example services (`cheap`, `family`).
-Each mounts its own `profiles/<name>.yaml` and `data/<name>/`. Make sure each
-YAML has `database_location: /data/db.sqlite` so files land in the per-profile
-volume.
-
-```bash
-mkdir -p profiles data/cheap data/family
-cp config.example.yaml profiles/cheap.yaml   # edit for cheap rentals
-cp config.example.yaml profiles/family.yaml  # edit for family flats
-docker compose up -d
-```
+- **Alerts:**
+  - The watchdog sends crawler-down and stall alerts to `hunter.yaml`'s
+    `global.telegram` and to ntfy (`NTFY_URL`).
+  - `deploy/run-job.sh` POSTs to ntfy when a cron job fails, and once per
+    episode when a job has not succeeded within its max age.
+  - The `watchdog` healthcheck goes unhealthy while a job is stale.
+- **Update:** push to `main`, wait for the workflow, then Apps > flathunter >
+  Update (or Redeploy); `pull_policy: always` fetches the new `:latest`.
+- **Logs/shell:** Apps > flathunter > Logs, and Apps > flathunter > Shell.
 
 
 ## Status (verified live 2026-04-28)

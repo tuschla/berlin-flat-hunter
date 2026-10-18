@@ -1,0 +1,54 @@
+# berlin-flat-hunter as a TrueNAS SCALE Custom App
+# (Apps > Discover > Custom App > Install via YAML; app name: flathunter).
+#
+# Two services from one image (ghcr.io/tuschla/berlin-flat-hunter, built by
+# GitHub Actions on every push to main):
+#   hunter    long-running shared-scrape loop: python main.py --hunter /app/hunter.yaml
+#   watchdog  supercronic running deploy/crontab: crawler watchdog every 15 min
+#             (Telegram + ntfy alerts), stale-job check every 30 min. Its
+#             healthcheck turns unhealthy when the watchdog job goes stale.
+#
+# Datasets (owner 568:568 = apps, mode 0750; config files 0600):
+#   /mnt/nvme0/apps/flathunter/data     -> /data (read-write state: SQLite DBs,
+#       schema_monitor.json, watchdog_state.json, .status/, home/).
+#       The image links /app/data -> /data.
+#   /mnt/nvme0/apps/flathunter/config   read-only config:
+#       hunter.yaml   -> /app/hunter.yaml
+#       profiles/     -> /app/profiles/   (the profile YAMLs listed in hunter.yaml)
+#   Every database_location in these YAMLs must point at /app/data/...
+#
+# Update: Apps > flathunter > Update (or Redeploy); pull_policy: always pulls
+# the newest :latest image. After editing config files: Apps > flathunter >
+# Restart. Logs and shell: Apps > flathunter > Logs / Shell.
+
+x-common: &common
+  image: ghcr.io/tuschla/berlin-flat-hunter:latest
+  pull_policy: always
+  user: "568:568"
+  restart: unless-stopped
+  environment:
+    TZ: Europe/Berlin
+    NTFY_URL: "CHANGE_ME_NTFY_TOPIC_URL"
+  volumes:
+    - /mnt/nvme0/apps/flathunter/config/hunter.yaml:/app/hunter.yaml:ro
+    - /mnt/nvme0/apps/flathunter/config/profiles:/app/profiles:ro
+    - /mnt/nvme0/apps/flathunter/data:/data
+
+services:
+  hunter:
+    <<: *common
+    command: ["python", "main.py", "--hunter", "/app/hunter.yaml"]
+    mem_limit: 1g
+    # Chrome (auto-apply) crashes when /dev/shm is the 64 MB default.
+    shm_size: 1g
+
+  watchdog:
+    <<: *common
+    command: ["supercronic", "-passthrough-logs", "/app/deploy/crontab"]
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "/app/deploy/run-job.sh", "--healthy"]
+      interval: 5m
+      timeout: 30s
+      start_period: 1m
+      retries: 1

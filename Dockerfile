@@ -1,14 +1,25 @@
-FROM python:3.12-slim AS builder
+# Image for the TrueNAS Custom App (deploy/truenas-app.yaml). Built and pushed to
+# ghcr.io/tuschla/berlin-flat-hunter by .github/workflows/image.yml.
+#
+# Contains code only. Config and state come from mounts at runtime:
+#   /app/hunter.yaml, /app/profiles/   read-only config (Telegram tokens, PII)
+#   /data                              read-write state; /app/data -> /data
+# Runs as uid:gid 568:568 (TrueNAS `apps`) and never writes into /app.
 
-# Install uv for fast dep resolution
-COPY --from=ghcr.io/astral-sh/uv:0.5 /uv /uvx /bin/
+FROM python:3.13-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:0.13.1 /uv /uvx /bin/
+
+# flathunter is a git dependency (commit pinned in uv.lock); uv needs git to fetch it.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 ENV UV_LINK_MODE=copy \
     UV_COMPILE_BYTECODE=1 \
     UV_PYTHON_DOWNLOADS=never
 
-# Install deps (no project) using lockfile
+# Install deps (no project) from the lockfile
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-project --no-dev
@@ -20,76 +31,45 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
 
 
-FROM python:3.12-slim AS runtime
+FROM python:3.13-slim
 
-# Chromium + driver for selenium (Kleinanzeigen crawl + auto-apply).
-# Skip if you only crawl Gewobag/WBM/Gesobau and don't auto-apply.
+LABEL org.opencontainers.image.source=https://github.com/tuschla/berlin-flat-hunter
+
+# chromium + driver: Selenium auto-apply (currently disabled in every profile,
+# kept so it can be switched back on). curl: ntfy alerts and the supercronic
+# download. util-linux: flock for deploy/run-job.sh. tzdata: TZ=Europe/Berlin.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium chromium-driver ca-certificates fonts-liberation \
+        chromium chromium-driver fonts-liberation ca-certificates \
+        curl util-linux tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-ENV PATH="/app/.venv/bin:$PATH" \
+# supercronic runs deploy/crontab in the `watchdog` service.
+# Version and SHA1 come from the GitHub release notes.
+ARG SUPERCRONIC_VERSION=v0.2.50
+ARG SUPERCRONIC_SHA1SUM=0795da10bf6303e9680a2c2bd8dd6b9aa33ebda2
+RUN curl -fsSL -o /usr/local/bin/supercronic \
+        "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64" \
+    && echo "${SUPERCRONIC_SHA1SUM}  /usr/local/bin/supercronic" | sha1sum -c - \
+    && chmod 0755 /usr/local/bin/supercronic
+
+ENV BFH_REPO=/app \
+    HOME=/data/home \
     PYTHONUNBUFFERED=1 \
-    BFH_DATA_DIR=/data \
-    BFH_CONFIG=/config/config.yaml
+    PYTHONDONTWRITEBYTECODE=1 \
+    TZ=Europe/Berlin \
+    PATH="/app/.venv/bin:$PATH"
 
 WORKDIR /app
 COPY --from=builder /app /app
+COPY scripts ./scripts
+COPY deploy ./deploy
 
-# Non-root user; /data and /config will be volume-mounted.
-RUN useradd -u 1000 -m -s /bin/bash hunter \
-    && mkdir -p /data /config \
-    && chown -R hunter:hunter /app /data /config
-USER hunter
+# State lives on the /data mount. The symlink keeps `data/...` paths and the
+# watchdog's $BFH_REPO/data paths working without code changes.
+RUN chmod 0755 deploy/entrypoint.sh deploy/run-job.sh \
+    && ln -s /data /app/data
 
-VOLUME ["/data", "/config"]
+USER 568:568
 
-ENTRYPOINT ["python", "main.py"]
-CMD ["--config", "/config/config.yaml"]
-
-
-# --------------------------------------------------------------------------
-# runtime-vnc — same app, but Chrome runs *headed* inside Xvfb and is
-# accessible via a noVNC web client on port 6080. Persistent Chrome profile
-# is volume-mounted so cookies/login state survive container restarts —
-# the workaround for sites whose reCAPTCHA fingerprints anything that
-# looks like fresh / headless / non-warmed automation.
-#
-# Build:   docker build --target runtime-vnc -t bfh:vnc .
-# Run:     docker run -p 6080:6080 -v ./chrome-profile:/data/chrome-profile bfh:vnc
-# Connect: open http://localhost:6080/vnc.html in any browser
-# --------------------------------------------------------------------------
-FROM runtime AS runtime-vnc
-
-USER root
-
-# xvfb         → virtual X server (no physical display)
-# fluxbox      → minimal window manager (some sites probe for one)
-# x11vnc       → bridges Xvfb to VNC protocol on :5900
-# novnc        → web-based VNC client served at /usr/share/novnc/
-# websockify   → translates noVNC's WebSocket frames ↔ raw VNC bytes
-# supervisor   → keeps Xvfb / fluxbox / x11vnc / websockify / app alive
-# dbus + libgtk → Chrome refuses to start without these in headed mode
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        xvfb x11vnc fluxbox \
-        novnc websockify \
-        supervisor \
-        dbus dbus-x11 libgtk-3-0 libnss3 libxss1 libasound2 \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/log/supervisor
-
-COPY docker/supervisord.conf /etc/supervisor/conf.d/bfh.conf
-
-# Profile dir lives under /data so it shares the per-profile volume that
-# already holds db.sqlite + stats.db + schema_monitor.json.
-ENV BFH_CHROME_PROFILE=/data/chrome-profile \
-    DISPLAY=:99
-
-# noVNC web client. Raw VNC (5900) is intentionally NOT exposed by default —
-# noVNC speaks WebSocket, not raw RFB, and exposing 5900 invites scans.
-EXPOSE 6080
-
-USER hunter
-
-ENTRYPOINT ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/bfh.conf", "-n"]
-CMD []
+ENTRYPOINT ["/app/deploy/entrypoint.sh"]
+CMD ["python", "main.py", "--hunter", "/app/hunter.yaml"]

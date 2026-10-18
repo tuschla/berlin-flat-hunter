@@ -15,7 +15,7 @@ global:
   # Shared crawl state. schema_monitor.json (crawler-down health, read by the
   # watchdog) lives in this directory. Use a dir NOT shared with any profile's
   # database_location.
-  database_location: /root/berlin-flat-hunter/data/db.sqlite
+  database_location: /app/data/db.sqlite
 
   loop:
     active: true
@@ -44,7 +44,7 @@ global:
   # per-profile `statistics:` off. On by default; set enabled: false to disable.
   statistics:
     enabled: true
-    # db_path: /root/berlin-flat-hunter/data/stats.db   # defaults next to database_location
+    # db_path: /app/data/stats.db   # defaults next to database_location
 
   # Shared alert channel (crawler-down / schema-change). Per-listing
   # notifications still use each profile's own telegram config.
