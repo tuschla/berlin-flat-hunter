@@ -7,9 +7,10 @@
 #   python main.py --hunter hunter.yaml
 #
 # Each profile file is an ordinary single-profile config (see
-# config.example.yaml) and keeps its own filters, telegram, auto-apply,
-# database_location (dedup state), stats and geo settings. Only the network
-# scrape is shared.
+# config.example.yaml) and keeps its own urls, filters, telegram, auto-apply,
+# database_location (dedup state) and geo settings. The shared crawl covers
+# exactly the union of the profiles' urls; each profile only processes the
+# sources it lists itself.
 
 global:
   # Shared crawl state. schema_monitor.json (crawler-down health, read by the
@@ -21,36 +22,29 @@ global:
     active: true
     sleeping_time: 300   # seconds between shared crawls
 
-  # Extra URLs to crawl once and offer to every profile, for sources no single
-  # profile lists yet (e.g. degewo). Per-profile `filters:` still apply.
-  urls:
-    - https://www.degewo.de/immosuche/
-
-  # Crawler-down alerting for the SHARED crawl (was per-profile before). Alerts
-  # go to the channel configured under `telegram:` here.
+  # Crawler-down alerting for the SHARED crawl. With alert_via_notifiers: true
+  # the hunter sends each alert to the `telegram:` channel here AND to every
+  # profile's own Telegram bot (each chat once); without it alerts only go to
+  # the log. The watchdog never repeats these on Telegram (it copies them to
+  # ntfy, and alerts on a stalled hunter).
   monitoring:
     consecutive_empty_threshold: 3
     alert_via_notifiers: true
     alert_cooldown_seconds: 3600
     alert_cooldown_cap_seconds: 86400
 
-  notifiers:
-    - telegram
-
   # General-data log: ONE shared SQLite recording every listing the shared crawl
   # sees (url/title/price/rooms/size/warm+cold/first+last seen). This is the
   # only "logging" DB — each profile's data/<name>/db.sqlite is flathunter's
-  # per-profile "already seen" dedup state (operational, not a log), so keep
-  # per-profile `statistics:` off. On by default; set enabled: false to disable.
+  # per-profile "already seen" dedup state (operational, not a log). On by
+  # default; set enabled: false to disable.
   statistics:
     enabled: true
     # db_path: /app/data/stats.db   # defaults next to database_location
 
-  # Shared alert channel (crawler-down / schema-change). Per-listing
-  # notifications still use each profile's own telegram config.
-  # NOTE: crawler-down alerts are ALSO fanned out to every profile's own
-  # Telegram bot (deduped), since a shared-crawl outage affects all profiles —
-  # so each profile owner hears about it on their own bot, plus this channel.
+  # Shared alert channel (crawler-down / schema-change, and the watchdog's
+  # stall alert). Per-listing notifications use each profile's own telegram
+  # config and `notifiers:` list.
   # telegram:
   #   bot_token: "YOUR_ALERT_BOT_TOKEN"
   #   receiver_ids:

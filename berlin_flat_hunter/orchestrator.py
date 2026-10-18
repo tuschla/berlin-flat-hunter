@@ -11,8 +11,8 @@ pipeline (:meth:`BerlinHunter.process_raw`).
 
 Everything downstream of the crawl stays per-profile: each profile keeps its own
 ``IdMaintainer`` (so "already seen" / notification dedup is independent), its own
-filters, notifiers, stats DB and auto-applicator. Only the network-heavy scrape
-is shared.
+filters, notifiers and auto-applicator. Only the network-heavy scrape, crawl
+health and the general-data log (``stats.db``) are shared.
 
 Config lives in ``hunter.yaml`` (see ``hunter.yaml.example``):
 
@@ -20,11 +20,12 @@ Config lives in ``hunter.yaml`` (see ``hunter.yaml.example``):
       database_location: /path/to/data/db.sqlite   # shared crawl state lives here
       loop: {active: true, sleeping_time: 300}
       monitoring: {...}          # schema-change / crawler-down alerting
-      notifiers: [telegram]      # channel for crawler-down alerts
-      telegram: {bot_token: ..., receiver_ids: [...]}
+      telegram: {bot_token: ..., receiver_ids: [...]}   # channel for crawler-down alerts
     profiles:
       - profiles/single.yaml
       - profiles/wg.yaml
+
+The crawl covers exactly the sources the profiles list in their own ``urls``.
 """
 import os
 import time
@@ -35,20 +36,8 @@ from flathunter.idmaintainer import IdMaintainer
 from flathunter.logging import logger
 
 from berlin_flat_hunter.config import BerlinConfig
-from berlin_flat_hunter.hunter import BerlinHunter, _coerce_expose_id
+from berlin_flat_hunter.hunter import BerlinHunter
 from berlin_flat_hunter.notify import TelegramNotifier
-
-
-class _TelegramAlertChannel:
-    """Adapts a berlin TelegramNotifier to the ``.notify(msg)`` interface the
-    SchemaMonitor alert dispatch expects, so a crawler-down alert can be routed
-    to a specific bot+chat (each profile has its own bot)."""
-
-    def __init__(self, bot_token: str, chat_ids: list, timeout: float = 30.0):
-        self._n = TelegramNotifier(bot_token, chat_ids, timeout=timeout)
-
-    def notify(self, message: str) -> bool:
-        return self._n.send(message)
 
 
 def _resolve(path: str, base_dir: str) -> str:
@@ -83,7 +72,6 @@ class Orchestrator:
     def __init__(self, hunter_cfg: dict, base_dir: str = "."):
         self.base_dir = base_dir
         g = hunter_cfg.get("global", {}) or {}
-        self._global = g
 
         loop_cfg = g.get("loop", {}) or {}
         self.loop_active = bool(loop_cfg.get("active", True))
@@ -125,9 +113,14 @@ class Orchestrator:
 
     def _wire_shared_alert_channels(self, g: dict) -> None:
         """Route crawler-down alerts for the shared crawl to the global alert
-        channel AND to every profile's own Telegram bot (deduped). A shared-crawl
-        outage affects every profile, so each profile owner is told on their own
-        bot (profiles can sit on different bots/chats)."""
+        channel AND to every profile's own Telegram bot (deduped), when
+        ``global.monitoring.alert_via_notifiers`` is on. A shared-crawl outage
+        affects every profile, so each profile owner is told on their own bot
+        (profiles can sit on different bots/chats)."""
+        if not (g.get("monitoring", {}) or {}).get("alert_via_notifiers", False):
+            logger.info("Orchestrator: crawler-down alerts off "
+                        "(global.monitoring.alert_via_notifiers not set)")
+            return
         # Group by bot token with a UNION of chat ids, so the same chat behind one
         # bot (e.g. global + a profile that both use it) is never alerted twice —
         # even if their receiver_ids only partially overlap.
@@ -147,9 +140,11 @@ class Orchestrator:
         for _, hunter in self.profiles:
             add(hunter.config.telegram_bot_token(), hunter.config.telegram_receiver_ids())
         if by_token:
+            # Replace the lead's own global-telegram channel with the grouped
+            # set; other alert notifier types configured globally stay.
             self.lead._alert_notifiers = [
-                _TelegramAlertChannel(tok, sorted(chats)) for tok, chats in by_token.items()
-            ]
+                n for n in self.lead._alert_notifiers if not isinstance(n, TelegramNotifier)
+            ] + [TelegramNotifier(tok, sorted(chats)) for tok, chats in by_token.items()]
             logger.info("Orchestrator: crawler-down alerts → %d bot(s), %d chat(s)",
                         len(by_token), sum(len(c) for c in by_token.values()))
 
@@ -162,14 +157,15 @@ class Orchestrator:
         alert notifiers. It never processes exposes, so it builds no filters,
         stats or applicator.
         """
+        if g.get("urls"):
+            # Each profile only processes the sources it lists itself, so a
+            # global-only URL would be crawled for nobody.
+            logger.warning("Orchestrator: global.urls is ignored — list each source "
+                           "in the urls of the profiles that want it")
         union_urls: list[str] = []
         seen: set[str] = set()
-        # Extra shared URLs declared at the orchestrator level (e.g. a source no
-        # single profile lists yet, like degewo) are crawled once and offered to
-        # every profile's filter chain just like any other source.
-        url_sources = [g.get("urls", []) or []] + [h.config.target_urls() for _, h in self.profiles]
-        for urls in url_sources:
-            for url in urls:
+        for _, hunter in self.profiles:
+            for url in hunter.config.target_urls():
                 if url not in seen:
                     seen.add(url)
                     union_urls.append(url)
@@ -213,16 +209,12 @@ class Orchestrator:
         """One cycle: shared crawl → health → per-profile fan-out."""
         try:
             raw = self._dedup(list(self.lead.crawl_for_exposes(max_pages)))
-            # Coerce ids once up front so the shared general-data log and every
-            # profile key string-id crawlers (Gewobag/degewo) identically.
-            for expose in raw:
-                _coerce_expose_id(expose)
             self.lead._record_health(raw)  # one schema-monitor tick for the shared crawl
         except Exception:  # noqa: BLE001 — a wholesale crawl failure must still alert
             logger.error("Shared crawl aborted before health could be recorded:\n%s",
                          traceback.format_exc())
             try:
-                # Force-tick every crawler empty so the watchdog's down-alerts fire
+                # Force-tick every crawler empty so the crawler-down alerts fire
                 # even when the crawl blew up entirely (the failure mode they exist for).
                 self.lead._record_total_failure()
             except Exception as exc:  # noqa: BLE001

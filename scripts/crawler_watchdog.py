@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
-"""Crawler watchdog — alert when a crawler is down or the hunter has stalled.
+"""Crawler watchdog — alert when the hunter has stalled; copy crawler-down to ntfy.
 
-The SchemaMonitor already detects when a crawler stops returning results and
-persists per-crawler health to ``<state_dir>/schema_monitor.json``. This
-oneshot watchdog reads that state (run every 15 min by supercronic in the
-TrueNAS app's ``watchdog`` service, see ``deploy/crontab``) and, when a crawler
-is flagged *down*, alerts the ``global.telegram`` bot from hunter.yaml and,
-when ``NTFY_URL`` is set, the ntfy topic. Alert-only: diagnosis and fixes are
-done by a human (``scripts/probe_url.py`` checks whether this host's IP is
-blocked).
+Crawler-down alerts on Telegram come from the hunter itself: its SchemaMonitor
+flags a crawler and the hunter sends the alert in-process to
+``global.telegram`` and every profile's bot (``global.monitoring``). This
+oneshot (run every 15 min by supercronic in the TrueNAS app's ``watchdog``
+service, see ``deploy/crontab``) reads the monitor's state in
+``<state_dir>/schema_monitor.json`` and covers what the hunter cannot:
 
-De-dup: one alert per *down episode*. An episode is keyed by the crawler's
-``last_success_ts`` (which only advances on a successful crawl), so a crawler
-that recovers and breaks again alerts afresh, while one that stays broken
-alerts once.
+* Stall: the hunter rewrites schema_monitor.json every cycle (~6 min). If it is
+  older than ``STALL_AFTER`` (env ``BFH_STALL_AFTER``, default 30 min) the
+  process is alive but stuck mid-cycle, and per-crawler health is frozen. This
+  alerts ``global.telegram`` from hunter.yaml and, when ``NTFY_URL`` is set, the
+  ntfy topic. One alert per stall episode, keyed by the frozen mtime.
+* Crawler down: ntfy only (the maintainer's channel; Telegram already has the
+  hunter's alert). A crawler is down while the monitor's ``consecutive_alerts``
+  is >= 1. One alert per down episode, keyed by the crawler's
+  ``last_success_ts`` (which only moves on a healthy crawl), so a crawler that
+  recovers and breaks again alerts afresh.
 
-Stall check: the hunter rewrites schema_monitor.json every cycle (~6 min). If
-it is older than ``STALL_AFTER`` (env ``BFH_STALL_AFTER``, default 30 min) the
-process is alive but stuck mid-cycle — per-crawler health is frozen then, so
-the down-crawler check can't see it. That alerts once per stall episode.
+An episode is recorded as handled only once at least one channel accepted the
+alert, so a send that fails (e.g. the network is down too) is retried on the
+next run. Alert-only: diagnosis and fixes are done by a human
+(``scripts/probe_url.py`` checks whether this host's IP is blocked).
 
 Run manually:  python scripts/crawler_watchdog.py --dry-run   # print, don't act
                python scripts/crawler_watchdog.py --force     # ignore de-dup
@@ -31,11 +35,12 @@ import os
 import sys
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
 import yaml
+
+from berlin_flat_hunter.notify import TelegramNotifier
 
 REPO_DIR = os.environ.get("BFH_REPO", "/app")
 NTFY_URL = os.environ.get("NTFY_URL", "")
@@ -52,8 +57,8 @@ WATCHDOG_STATE = os.path.join(REPO_DIR, "data", "watchdog_state.json")
 DEZSO_NOTE = "📩 Dezső, se stai leggendo questo messaggio, dovresti contattare Leon."
 
 # Shared-scrape deployment: ONE process crawls every source once per cycle, so
-# there is ONE schema monitor (not one per profile) and crawler-down alerts go
-# to the shared channel configured in hunter.yaml's `global.telegram`.
+# there is ONE schema monitor (not one per profile), and the stall alert goes to
+# the shared channel configured in hunter.yaml's `global.telegram`.
 HUNTER_YAML = os.path.join(REPO_DIR, "hunter.yaml")
 
 
@@ -120,24 +125,11 @@ def hunter_telegram(hunter_cfg: dict | None = None) -> tuple[str, list[str]]:
 
 
 def send_telegram(token: str, ids: list[str], text: str) -> bool:
-    if not token or not ids:
+    notifier = TelegramNotifier(token, ids)
+    if not notifier.enabled:
         log("telegram: no bot_token/receiver_ids configured — skipping send")
         return False
-    ok = True
-    for chat_id in ids:
-        payload = urllib.parse.urlencode({
-            "chat_id": chat_id, "text": text, "disable_web_page_preview": "true",
-        }).encode()
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        try:
-            with urllib.request.urlopen(urllib.request.Request(url, data=payload),
-                                        timeout=20) as resp:
-                if resp.status != 200:
-                    ok = False
-        except urllib.error.URLError as exc:
-            log(f"telegram send failed for {chat_id}: {exc}")
-            ok = False
-    return ok
+    return notifier.send(text)
 
 
 def send_ntfy(title: str, text: str) -> bool:
@@ -154,10 +146,12 @@ def send_ntfy(title: str, text: str) -> bool:
         return False
 
 
-def alert(token: str, ids: list[str], title: str, text: str) -> None:
-    """Send one alert to Telegram (with the note for Dezső) and to ntfy."""
-    send_telegram(token, ids, f"{text}\n\n{DEZSO_NOTE}")
-    send_ntfy(title, text)
+def alert(token: str, ids: list[str], title: str, text: str) -> bool:
+    """Send one alert to Telegram (with the note for Dezső) and to ntfy.
+    True when at least one of them accepted it."""
+    telegram_ok = send_telegram(token, ids, f"{text}\n\n{DEZSO_NOTE}")
+    ntfy_ok = send_ntfy(title, text)
+    return telegram_ok or ntfy_ok
 
 
 def human_ago(ts: float) -> tuple[str, str]:
@@ -171,15 +165,15 @@ def human_ago(ts: float) -> tuple[str, str]:
 
 
 def should_alert(wd_state: dict, key: str, health: dict, force: bool) -> bool:
-    """True for a new down episode (``last_success_ts`` differs from the one we
-    last alerted on) or when forced."""
+    """True for a new episode (``last_success_ts`` differs from the one we last
+    alerted on) or when forced."""
     if force:
         return True
     return wd_state.get(key, {}).get("handled_success_ts") != health.get("last_success_ts")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Alert on down crawlers and a stalled hunter")
+    ap = argparse.ArgumentParser(description="Alert on a stalled hunter; copy down crawlers to ntfy")
     ap.add_argument("--dry-run", action="store_true",
                     help="print what would happen; do not send alerts")
     ap.add_argument("--force", action="store_true",
@@ -208,11 +202,13 @@ def main() -> int:
                 f"DRY-RUN: would alert Telegram {ids or '[]'} and ntfy={bool(NTFY_URL)}")
         else:
             log(f"{STALL_KEY}: no crawl cycle completed for {ago} (last {when}); alerting")
-            alert(token, ids, f"flathunter: hunter stalled for {ago}", (
-                f"🔴 Watchdog: il hunter non completa un ciclo di scansione da {ago} "
-                f"(ultimo: {when}) — probabilmente bloccato. Nessun annuncio viene "
-                f"cercato finché non riparte (TrueNAS: Apps > flathunter > Restart)."))
-            wd_state[STALL_KEY] = {"handled_success_ts": last_tick, "alert_ts": now}
+            if alert(token, ids, f"flathunter: hunter stalled for {ago}", (
+                    f"🔴 Watchdog: il hunter non completa un ciclo di scansione da {ago} "
+                    f"(ultimo: {when}) — probabilmente bloccato. Nessun annuncio viene "
+                    f"cercato finché non riparte (TrueNAS: Apps > flathunter > Restart).")):
+                wd_state[STALL_KEY] = {"handled_success_ts": last_tick, "alert_ts": now}
+            else:
+                log(f"{STALL_KEY}: every alert channel failed — retrying next run")
 
     for crawler, health in down_crawlers(state):
         any_down = True
@@ -220,19 +216,24 @@ def main() -> int:
         if not should_alert(wd_state, key, health, args.force):
             log(f"{key}: down but already alerted this episode — skipping")
             continue
-        _, ago = human_ago(float(health.get("last_success_ts", 0)))
+        last_ok, _ = human_ago(float(health.get("last_success_ts", 0)))
         empty = int(health.get("consecutive_empty", 0))
-        log(f"{key}: down — {empty} empty crawls, last success {ago} ago; alerting")
+        problem = (f"0 results for {empty} consecutive crawls" if empty
+                   else "most results miss critical fields (title/url/address/price)")
+        log(f"{key}: down — {problem}, last healthy crawl {last_ok}")
 
-        if args.dry_run:
-            log(f"DRY-RUN: would alert Telegram {ids or '[]'} and ntfy={bool(NTFY_URL)}")
+        if not NTFY_URL:
+            log(f"{key}: NTFY_URL not set — only the hunter's Telegram alert goes out")
             continue
-
-        alert(token, ids, f"flathunter: crawler {crawler} down", (
-            f"🔴 Watchdog: il crawler {crawler} sembra non rispondere — "
-            f"{empty} scansioni a vuoto, ultimo successo {ago} fa. "
-            f"Log: TrueNAS > Apps > flathunter > Logs."))
-        wd_state[key] = {"handled_success_ts": health.get("last_success_ts"), "alert_ts": now}
+        if args.dry_run:
+            log(f"DRY-RUN: would alert ntfy for {key}")
+            continue
+        if send_ntfy(f"flathunter: crawler {crawler} down", (
+                f"{crawler}: {problem}; last healthy crawl {last_ok}. The hunter has "
+                f"alerted Telegram. Logs: TrueNAS > Apps > flathunter > Logs.")):
+            wd_state[key] = {"handled_success_ts": health.get("last_success_ts"), "alert_ts": now}
+        else:
+            log(f"{key}: ntfy send failed — retrying next run")
 
     if not args.dry_run:
         os.makedirs(os.path.dirname(WATCHDOG_STATE), exist_ok=True)

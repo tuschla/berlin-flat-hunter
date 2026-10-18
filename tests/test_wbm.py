@@ -6,6 +6,7 @@ import requests
 import requests_mock as req_mock
 from bs4 import BeautifulSoup
 
+from berlin_flat_hunter.crawlers.common import listing_id
 from berlin_flat_hunter.crawlers.wbm import Wbm
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "wbm_listings.html")
@@ -48,24 +49,22 @@ class TestWbmCrawler(unittest.TestCase):
         for key in ("id", "url", "title", "address", "rooms", "size", "price", "crawler"):
             self.assertIn(key, results[0])
 
-    def test_stable_url_keyed_id_after_coercion(self):
-        # WBM's data-uid is unstable; the crawler emits it, but the stable
-        # identity is applied centrally (BerlinHunter._coerce_expose_id keys WBM
-        # off the URL slug). Simulate that here.
-        import zlib
-
-        from berlin_flat_hunter.hunter import _coerce_expose_id
-
+    def test_id_is_listing_id_of_url(self):
+        # WBM's data-uid changes for the same listing; the id comes from the URL.
         with req_mock.Mocker() as m:
             m.get(req_mock.ANY, text=_fixture_html())
             results = self.crawler.get_results(SEARCH_URL, max_pages=1)
-
         for r in results:
-            _coerce_expose_id(r)
-            slug = r["url"].rstrip("/").rsplit("/", 1)[-1]
-            self.assertEqual(r["id"], zlib.crc32(slug.encode("utf-8")))
-            self.assertIsInstance(r["id"], int)
+            self.assertEqual(r["id"], listing_id(r["url"]))
         self.assertNotEqual(results[0]["id"], results[1]["id"])
+
+    def test_id_stable_when_data_uid_changes(self):
+        changed = _fixture_html().replace('data-uid="76671"', 'data-uid="77593"')
+        with req_mock.Mocker() as m:
+            m.get(req_mock.ANY, [{"text": _fixture_html()}, {"text": changed}])
+            before = [r["id"] for r in self.crawler.get_results(SEARCH_URL, max_pages=1)]
+            after = [r["id"] for r in self.crawler.get_results(SEARCH_URL, max_pages=1)]
+        self.assertEqual(before, after)
 
     def test_entry_url_is_absolute(self):
         with req_mock.Mocker() as m:
@@ -96,6 +95,15 @@ class TestWbmCrawler(unittest.TestCase):
             m.get(req_mock.ANY, text=_fixture_html())
             results = self.crawler.get_results(SEARCH_URL, max_pages=1)
         self.assertIn("1.112,13", results[0]["price"])
+        # main-property-rent is the card's "Warmmiete".
+        self.assertEqual(results[0]["price_warm"], results[0]["price"])
+        self.assertEqual(results[0]["price_cold"], "")
+
+    def test_price_without_amount_is_empty(self):
+        html = _fixture_html().replace("1.112,13", "Auf Anfrage", 1)
+        entries = self.crawler.extract_data(BeautifulSoup(html, "html.parser"))
+        self.assertEqual(entries[0]["price"], "")
+        self.assertEqual(entries[0]["price_warm"], "")
 
     def test_entry_size_from_main_property_size(self):
         with req_mock.Mocker() as m:

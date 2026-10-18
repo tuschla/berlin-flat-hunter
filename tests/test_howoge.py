@@ -9,6 +9,7 @@ import requests_mock as req_mock
 from bs4 import BeautifulSoup
 
 from berlin_flat_hunter.crawlers import howoge
+from berlin_flat_hunter.crawlers.common import listing_id
 from berlin_flat_hunter.crawlers.howoge import Howoge, JSON_ENDPOINT
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "howoge_index.json")
@@ -41,6 +42,21 @@ def _register(m, payload=None, status_code=200):
     )
 
 
+class TestSharedSessionUserAgent(unittest.TestCase):
+    def test_shared_session_sends_browser_user_agent(self):
+        # Fresh interpreter: other test modules may have imported flathunter's
+        # UA patch already and would hide an import-order regression.
+        import subprocess
+        import sys
+        ua = subprocess.run(
+            [sys.executable, "-c",
+             "from berlin_flat_hunter.crawlers.common import SESSION;"
+             "print(SESSION.headers['User-Agent'])"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertNotIn("python-requests", ua)
+
+
 class TestHowogeCrawler(unittest.TestCase):
 
     def setUp(self):
@@ -66,12 +82,25 @@ class TestHowogeCrawler(unittest.TestCase):
                     "image", "crawler"):
             self.assertIn(key, results[0])
 
-    def test_id_is_int(self):
+    def test_id_is_listing_id_of_url(self):
         with req_mock.Mocker() as m:
             _register(m)
             results = self.crawler.get_results(SEARCH_URL)
-        self.assertEqual(results[0]["id"], 7094)
-        self.assertIsInstance(results[0]["id"], int)
+        for r in results:
+            self.assertEqual(r["id"], listing_id(r["url"]))
+        self.assertNotEqual(results[0]["id"], results[1]["id"])
+
+    def test_id_stable_when_site_uid_changes(self):
+        payload = _payload()
+        changed = dict(payload, immoobjects=[dict(o, uid=o["uid"] + 1000)
+                                             for o in payload["immoobjects"]])
+        with req_mock.Mocker() as m:
+            _register(m)
+            before = [r["id"] for r in self.crawler.get_results(SEARCH_URL)]
+        with req_mock.Mocker() as m:
+            _register(m, payload=changed)
+            after = [r["id"] for r in self.crawler.get_results(SEARCH_URL)]
+        self.assertEqual(before, after)
 
     def test_url_absolute(self):
         with req_mock.Mocker() as m:
@@ -113,6 +142,9 @@ class TestHowogeCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertIn("803", results[0]["price"])
         self.assertIn("€", results[0]["price"])
+        # The JSON rent is the Warmmiete.
+        self.assertEqual(results[0]["price_warm"], results[0]["price"])
+        self.assertEqual(results[0]["price_cold"], "")
 
     def test_rooms_formatted(self):
         with req_mock.Mocker() as m:
@@ -158,13 +190,16 @@ class TestHowogeCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertEqual(results, [])
 
-    def test_item_without_uid_skipped(self):
-        bad = {"immocount": 1, "teasercount": 0,
-               "immoobjects": [{"link": "/x.html", "title": "Foo"}]}
+    def test_item_without_uid_kept_with_url_id(self):
+        # The site uid isn't needed: a listing is identified by its URL.
+        payload = {"immocount": 1, "teasercount": 0,
+                   "immoobjects": [{"link": "/x.html", "title": "Foo"}]}
         with req_mock.Mocker() as m:
-            _register(m, payload=bad)
+            _register(m, payload=payload)
             results = self.crawler.get_results(SEARCH_URL)
-        self.assertEqual(results, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["url"], "https://www.howoge.de/x.html")
+        self.assertEqual(results[0]["id"], listing_id("https://www.howoge.de/x.html"))
 
     def test_item_without_link_skipped(self):
         bad = {"immocount": 1, "teasercount": 0,
@@ -247,7 +282,9 @@ class TestHowogePagination(unittest.TestCase):
     def test_real_pagination_still_collects_every_page(self):
         pages = {1: _items(1, 50), 2: _items(51, 10)}
         results, calls = self._crawl(lambda page: pages.get(page, []))
-        self.assertEqual(sorted(r["id"] for r in results), list(range(1, 61)))
+        self.assertEqual(sorted(r["url"] for r in results),
+                         sorted(f"https://www.howoge.de/wohnung/{uid}.html"
+                                for uid in range(1, 61)))
         self.assertEqual(calls, 2)
 
     def test_runaway_pagination_stops_at_page_cap(self):

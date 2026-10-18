@@ -2,11 +2,17 @@
 import re
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup
 
 from flathunter.abstract_crawler import Crawler
 from flathunter.logging import logger
+
+from berlin_flat_hunter.crawlers.common import (
+    absolute_url,
+    format_amount,
+    listing_id,
+    post_with_retry,
+)
 
 BASE_URL = "https://www.howoge.de"
 
@@ -23,32 +29,6 @@ _PAGE_SIZE = 50
 # typical stock; hitting it means pagination is broken, not that it's busy.
 _MAX_PAGES = 20
 
-_SESSION = requests.Session()
-
-
-def _absolute_url(href: str) -> str:
-    if not href:
-        return ""
-    if href.startswith("http"):
-        return href
-    return BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-
-
-def _format_int_amount(value, suffix: str) -> str:
-    """JSON returns rent/area/rooms as numbers; format with a unit suffix.
-    Returns "" when the value is missing/zero so schema_monitor can flag it."""
-    if value is None:
-        return ""
-    try:
-        num = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if num == 0:
-        return ""
-    if num.is_integer():
-        return f"{int(num)} {suffix}"
-    return f"{num:.2f} {suffix}"
-
 
 class Howoge(Crawler):
 
@@ -56,7 +36,7 @@ class Howoge(Crawler):
 
     def get_results(self, search_url: str, max_pages: Optional[int] = None) -> list:
         entries: list = []
-        seen_uids: set = set()
+        seen: set = set()
         page_cap = max_pages if max_pages is not None else _MAX_PAGES
         page = 1
         while True:
@@ -65,14 +45,12 @@ class Howoge(Crawler):
                 break
             new = 0
             for item in batch:
-                uid = item.get("uid")
-                if uid in seen_uids:
-                    continue
-                seen_uids.add(uid)
-                new += 1
                 entry = self._parse_item(item)
-                if entry:
-                    entries.append(entry)
+                if entry is None or entry["id"] in seen:
+                    continue
+                seen.add(entry["id"])
+                new += 1
+                entries.append(entry)
             # The live endpoint ignores the page/limit params and returns the
             # full list for every page. A page with nothing new means we've
             # seen everything; without this a list of ≥ _PAGE_SIZE items is
@@ -95,7 +73,8 @@ class Howoge(Crawler):
             "tx_howrealestate_json_list[page]": str(page),
             "tx_howrealestate_json_list[limit]": str(_PAGE_SIZE),
         }
-        resp = self._post_with_retry(JSON_ENDPOINT, data=data)
+        resp = post_with_retry(JSON_ENDPOINT, label="Howoge", headers=self.HEADERS,
+                               timeout=20, data=data)
         if resp is None or resp.status_code != 200:
             if resp is not None:
                 logger.warning("Howoge: HTTP %d for page %d", resp.status_code, page)
@@ -108,36 +87,11 @@ class Howoge(Crawler):
         items = payload.get("immoobjects")
         return items if isinstance(items, list) else []
 
-    def _post_with_retry(self, url: str, data: dict):
-        """POST ``url`` with one retry on 5xx / transient network failure.
-        Returns the final Response (which may still be non-200) or None on
-        hard failure. Mirrors Gewobag._fetch_with_retry — a single transient
-        5xx blip would otherwise tick the schema-monitor's empty-crawl counter
-        and start a false-alarm ladder.
-        """
-        for attempt in range(2):
-            try:
-                resp = _SESSION.post(url, data=data, headers=self.HEADERS, timeout=20)
-            except requests.exceptions.RequestException as exc:
-                if attempt == 0:
-                    logger.debug("Howoge: transient POST error, retrying: %s", exc)
-                    continue
-                logger.warning("Howoge: request failed for %s: %s", url, exc)
-                return None
-            if 500 <= resp.status_code < 600 and attempt == 0:
-                continue
-            return resp
-        return None
-
     def _parse_item(self, item: dict) -> Optional[dict]:
-        uid = item.get("uid")
         link = item.get("link", "")
-        if uid is None or not link:
+        if not link:
             return None
-        try:
-            uid_int = int(uid)
-        except (TypeError, ValueError):
-            return None
+        url = absolute_url(BASE_URL, link)
 
         # title field is the postal address ("Streitstraße 5, 13587 Berlin");
         # notice field is the descriptive label ("3-Zimmer-Wohnung (WBS 100-140)").
@@ -148,15 +102,19 @@ class Howoge(Crawler):
         district = (item.get("district") or "").strip()
         title = notice or self._synthesize_title(item, district)
 
+        # The JSON ``rent`` is the Warmmiete (the detail page's "Warmmiete").
+        price = format_amount(item.get("rent"), "€")
         return {
-            "id": uid_int,
-            "url": _absolute_url(link),
-            "image": _absolute_url(item.get("image", "")),
+            "id": listing_id(url),
+            "url": url,
+            "image": absolute_url(BASE_URL, item.get("image", "")),
             "title": title,
             "address": f"{address} ({district})" if district and address else address,
-            "rooms": _format_int_amount(item.get("rooms"), "Zimmer"),
-            "size": _format_int_amount(item.get("area"), "m²"),
-            "price": _format_int_amount(item.get("rent"), "€"),
+            "rooms": format_amount(item.get("rooms"), "Zimmer"),
+            "size": format_amount(item.get("area"), "m²"),
+            "price": price,
+            "price_cold": "",
+            "price_warm": price,
             "crawler": self.get_name(),
         }
 

@@ -31,8 +31,8 @@ class OllamaApplyGate:
     DEFAULT_PROMPT = DEFAULT_PROMPT
 
     def __init__(self, config):
-        cfg = config.ollama_config() if hasattr(config, "ollama_config") else {}
-        apply_cfg = config.config.get("auto_apply", {}) if hasattr(config, "config") else {}
+        cfg = config.ollama_config()
+        apply_cfg = config.config.get("auto_apply", {})
 
         url = cfg.get("url", DEFAULT_URL)
         model = apply_cfg.get("ollama_gate_model") or cfg.get("model", DEFAULT_MODEL)

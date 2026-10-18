@@ -1,10 +1,10 @@
-"""Tests for StatsLogger and StatsProcessor"""
+"""Tests for StatsLogger"""
 import os
 import tempfile
 import time
 import unittest
 
-from berlin_flat_hunter.stats import StatsLogger, StatsProcessor
+from berlin_flat_hunter.stats import StatsLogger
 
 EXPOSE_A = {
     "id": 1001, "url": "https://www.gewobag.de/1/", "title": "Wohnung A",
@@ -139,6 +139,12 @@ class TestStatsLogger(unittest.TestCase):
         self.assertEqual(row["rooms"], EXPOSE_A["rooms"])  # unchanged
         self.assertEqual(row["price"], EXPOSE_A["price"])
 
+    def test_backfill_replaces_placeholder_price_text(self):
+        """'Auf Anfrage' stored before the fix must not block the real amount."""
+        self.stats.log({**EXPOSE_A, "id": 10, "price": "Auf Anfrage"})
+        self.stats.log({**EXPOSE_A, "id": 10, "price": "1.901,62 Euro"})
+        self.assertEqual(self.stats.recent(limit=1)[0]["price"], "1.901,62 Euro")
+
     def test_last_seen_ts_bumped_on_resight(self):
         self.stats.log({**EXPOSE_A, "id": 9})
         first = self.stats.recent(limit=1)[0]["last_seen_ts"]
@@ -171,35 +177,6 @@ class TestStatsLogger(unittest.TestCase):
         finally:
             migrated.close()
             os.unlink(legacy)
-
-
-class TestStatsProcessor(unittest.TestCase):
-
-    def setUp(self):
-        self.path = _tmp_db()
-        self.stats = StatsLogger(self.path)
-        self.proc = StatsProcessor(self.stats)
-
-    def tearDown(self):
-        self.stats.close()
-        if os.path.exists(self.path):
-            os.unlink(self.path)
-
-    def test_process_returns_expose_unchanged(self):
-        result = self.proc.process_expose(dict(EXPOSE_A))
-        self.assertEqual(result["id"], EXPOSE_A["id"])
-
-    def test_process_logs_to_db(self):
-        self.proc.process_expose(dict(EXPOSE_A))
-        self.assertEqual(self.stats.count_total(), 1)
-
-    def test_process_is_non_destructive_on_log_error(self):
-        broken_stats = StatsLogger(self.path)
-        broken_stats.close()  # connection closed → log will raise
-        proc = StatsProcessor(broken_stats)
-        # Should not raise — processor swallows and logs
-        result = proc.process_expose(dict(EXPOSE_A))
-        self.assertEqual(result["id"], EXPOSE_A["id"])
 
 
 if __name__ == "__main__":

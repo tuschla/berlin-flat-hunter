@@ -1,14 +1,12 @@
 """Tests for PlzFilter — postal-code-based neighborhood filter."""
 import unittest
-from unittest.mock import MagicMock
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.filters.plz_filter import PlzFilter
 
 
 def _make_config(mapping):
-    cfg = MagicMock()
-    cfg.neighborhood_plz.return_value = mapping
-    return cfg
+    return BerlinConfig({"neighborhoods": mapping})
 
 
 def _expose(address: str, eid: int = 1) -> dict:
@@ -85,7 +83,7 @@ class TestPlzFilter(unittest.TestCase):
 
     def test_int_plz_normalised(self):
         """Config may give PLZ as ints; filter still matches."""
-        fltr = PlzFilter(_make_config({"Wedding": [str(13347)]}))
+        fltr = PlzFilter(_make_config({"Wedding": [13347]}))
         out = list(fltr.process_exposes([_expose("X, 13347 Berlin")]))
         self.assertEqual(len(out), 1)
 

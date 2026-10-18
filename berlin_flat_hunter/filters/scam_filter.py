@@ -92,7 +92,7 @@ class ScamFilter(Processor):
     """Drop kleinanzeigen exposes whose title/address matches a known scam pattern."""
 
     def __init__(self, config):
-        cfg = config.scam_filter_config() if hasattr(config, "scam_filter_config") else {}
+        cfg = config.scam_filter_config()
         override = cfg.get("override_patterns")
         if isinstance(override, list) and override:
             base: Iterable[str] = override

@@ -9,6 +9,8 @@ Two modes:
   crawl. Kept for one-off runs and backward compatibility.
 """
 import argparse
+import signal
+import sys
 import time
 import traceback
 
@@ -62,6 +64,13 @@ def run_shared(hunter_path: str, once: bool) -> None:
         orch.close()
 
 
+def _exit_on_sigterm(signum, frame) -> None:
+    """`docker stop` sends SIGTERM: unwind like Ctrl-C so the `finally` blocks
+    close the DBs and any browser, then exit 0."""
+    logger.info("SIGTERM received, shutting down.")
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Berlin flat hunter")
     parser.add_argument("--config", help="Path to a single-profile config YAML")
@@ -69,6 +78,7 @@ def main():
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
     args = parser.parse_args()
 
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
     if args.hunter:
         run_shared(args.hunter, args.once)
     else:

@@ -34,7 +34,7 @@ _HAS_ROOM = re.compile(r"[1-9]")
 
 class ExcludeFilter(Processor):
     def __init__(self, config):
-        cfg = config.exclude_filter_config() if hasattr(config, "exclude_filter_config") else {}
+        cfg = config.exclude_filter_config()
         use_defaults = bool(cfg.get("use_defaults", True))
         user_kw = [str(k).lower().strip() for k in (cfg.get("keywords") or []) if str(k).strip()]
         base = list(DEFAULT_EXCLUDE_KEYWORDS) if use_defaults else []

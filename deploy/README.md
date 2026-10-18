@@ -18,7 +18,8 @@ sites.
 
 - `hunter.yaml`: global settings + the list of profiles (see `hunter.yaml.example`).
 - `profiles/*.yaml`: one file per profile (unchanged format). Each keeps its own
-  filters, telegram, auto-apply, dedup DB, stats and geo settings.
+  urls, filters, telegram, auto-apply, dedup DB and geo settings. The shared
+  crawl covers exactly the profiles' urls (`global.urls` is ignored).
 - Shared crawl state (incl. the single `schema_monitor.json` the watchdog reads)
   lives next to `global.database_location` in `hunter.yaml`. Per-profile dedup
   DBs live under `data/<profile>/`.
@@ -81,26 +82,49 @@ Stop the app's `hunter` loop first if you don't want duplicate notifications.
 
 ## Telegram
 
-- **Per-listing** notifications use each profile's own `telegram:` config, and can
-  be routed **per source** to separate bots/chats (`telegram.bots_by_source` /
-  `chats_by_source`). An optional heartbeat/log channel (`telegram.log_bot_token`
-  / `log_chat_id`) gets a per-cycle summary.
-- **Crawler-down** alerts (shared crawl) go to `hunter.yaml`'s `global.telegram`
-  via `global.monitoring.alert_via_notifiers: true`.
+- **Per-listing** notifications go out only for profiles that list `telegram`
+  under `notifiers:` (`notifiers: []` = no listings, alerts only). They use the
+  profile's own `telegram:` config and can be routed **per source** to separate
+  bots/chats (`telegram.bots_by_source` / `chats_by_source`). An optional
+  heartbeat/log channel (`telegram.log_bot_token` / `log_chat_id`) gets a
+  per-cycle summary.
+- **Crawler-down** alerts (shared crawl) are sent by the hunter itself when
+  `hunter.yaml` sets `global.monitoring.alert_via_notifiers: true`: to
+  `global.telegram` and to every profile's own bot, each chat once. Without that
+  key they only go to the log.
+- **Manual-apply / applicator** alerts use the profile's own
+  `monitoring.alert_via_notifiers` + `alert_notifiers`.
 
 ## Crawler watchdog (alert-only)
 
 `scripts/crawler_watchdog.py` is a oneshot that cron runs every 15 min:
 
-- When the shared monitor flags a crawler as down (0 results for 3+ cycles), it
-  alerts `global.telegram` and, if `NTFY_URL` is set, the ntfy topic. One alert
-  per *down episode*: a crawler that recovers and breaks again alerts again.
-- It also alerts when no crawl cycle has completed for 30 min
-  (`BFH_STALL_AFTER`, seconds). That means the hunter is alive but stuck
-  mid-cycle, which freezes the per-crawler health the down check reads. One
-  alert per stall.
+- It alerts `global.telegram` and, if `NTFY_URL` is set, the ntfy topic when no
+  crawl cycle has completed for 30 min (`BFH_STALL_AFTER`, seconds). That means
+  the hunter is alive but stuck mid-cycle. One alert per stall.
+- When the shared monitor flags a crawler as down, it posts that to ntfy only;
+  Telegram already has the hunter's own alert. One alert per *down episode*: a
+  crawler that recovers and breaks again alerts again.
+- An episode only counts as handled once at least one channel accepted the
+  alert; failed sends are retried on the next run.
 - De-dup state: `data/watchdog_state.json`. Manual runs: `--dry-run` (print,
   don't send) or `--force` (ignore de-dup).
+
+## One-time data migration (cutover)
+
+Degewo listing ids are now derived from the detail URL like the other sources.
+Before the new image's first crawl cycle, with the `hunter` service stopped,
+seed the new ids so no Degewo listing is notified again. Run it in the
+`watchdog` container (same image, same `/data` mount), e.g. Apps > flathunter >
+Shell > watchdog:
+
+```bash
+python scripts/migrate_degewo_ids.py            # dry run: prints what would change
+python scripts/migrate_degewo_ids.py --apply    # writes /data/*/db.sqlite, state.db, stats.db
+```
+
+It is idempotent (a second run reports nothing to change). `--data-dir` defaults
+to `/data`.
 
 ## Job alerts (`deploy/run-job.sh`)
 

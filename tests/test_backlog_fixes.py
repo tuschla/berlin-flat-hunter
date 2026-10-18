@@ -131,6 +131,7 @@ def test_alert_channels_dedup_per_chat(tmp_path):
     yaml.safe_dump({
         "global": {"database_location": str(tmp_path / "data" / "db.sqlite"),
                    "loop": {"active": False},
+                   "monitoring": {"alert_via_notifiers": True},
                    "telegram": {"bot_token": "T", "receiver_ids": [1]}},  # overlaps chat 1
         "profiles": [prof],
     }, open(hy, "w"))
@@ -139,6 +140,6 @@ def test_alert_channels_dedup_per_chat(tmp_path):
     try:
         chans = o.lead._alert_notifiers
         assert len(chans) == 1                      # single bot token T
-        assert chans[0]._n.chat_ids == ["1", "2"]   # union; chat 1 not duplicated
+        assert chans[0].chat_ids == ["1", "2"]      # union; chat 1 not duplicated
     finally:
         o.close()

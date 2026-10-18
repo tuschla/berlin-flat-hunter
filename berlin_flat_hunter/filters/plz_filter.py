@@ -34,7 +34,7 @@ class PlzFilter(Processor):
     """Drop exposes whose address PLZ isn't in any configured neighborhood."""
 
     def __init__(self, config):
-        mapping = config.neighborhood_plz() if hasattr(config, "neighborhood_plz") else {}
+        mapping = config.neighborhood_plz()
         if not mapping:
             raise ValueError("neighborhoods: must contain at least one name → [PLZ, ...] entry")
 

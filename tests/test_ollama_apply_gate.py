@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.ollama_apply_gate import OllamaApplyGate, ALL_FIELDS
 
 EXPOSE = {
@@ -19,18 +20,14 @@ EXPOSE = {
 }
 
 
-class FakeConfig:
-    def __init__(self, apply_cfg=None, ollama_cfg=None):
-        self.config = {"auto_apply": apply_cfg or {}, "ollama": ollama_cfg or {}}
-
-    def ollama_config(self):
-        return self.config.get("ollama", {})
+def _make_config(apply_cfg=None, ollama_cfg=None):
+    return BerlinConfig({"auto_apply": apply_cfg or {}, "ollama": ollama_cfg or {}})
 
 
 class TestOllamaApplyGate(unittest.TestCase):
 
     def _gate(self, apply_cfg=None, ollama_cfg=None):
-        return OllamaApplyGate(FakeConfig(apply_cfg, ollama_cfg))
+        return OllamaApplyGate(_make_config(apply_cfg, ollama_cfg))
 
     def _mock_resp(self, text):
         resp = MagicMock()
@@ -141,26 +138,22 @@ class TestOllamaApplyGate(unittest.TestCase):
 class TestAutoApplicatorWithGate(unittest.TestCase):
     """Integration: AutoApplicator respects gate decision."""
 
-    def _make_config(self, gate_enabled=True):
-        cfg = MagicMock()
-        cfg.config = {"auto_apply": {"ollama_gate": gate_enabled}}
-        cfg.applicant_config.return_value = {}
-        cfg.ollama_config.return_value = {}
-        return cfg
+    def _gate_config(self, gate_enabled=True):
+        return _make_config(apply_cfg={"enabled": True, "ollama_gate": gate_enabled})
 
     def test_gate_disabled_skips_ollama(self):
         from berlin_flat_hunter.applicator import AutoApplicator
-        proc = AutoApplicator(self._make_config(gate_enabled=False))
+        proc = AutoApplicator(self._gate_config(gate_enabled=False))
         self.assertIsNone(proc.gate)
 
     def test_gate_enabled_creates_gate(self):
         from berlin_flat_hunter.applicator import AutoApplicator
-        proc = AutoApplicator(self._make_config(gate_enabled=True))
+        proc = AutoApplicator(self._gate_config(gate_enabled=True))
         self.assertIsNotNone(proc.gate)
 
     def test_gate_no_blocks_application(self):
         from berlin_flat_hunter.applicator import AutoApplicator
-        proc = AutoApplicator(self._make_config(gate_enabled=True))
+        proc = AutoApplicator(self._gate_config(gate_enabled=True))
         proc.gate = MagicMock(should_apply=MagicMock(return_value=False))
         for app in proc.applicators:
             app.apply = MagicMock(return_value=False)
@@ -172,7 +165,7 @@ class TestAutoApplicatorWithGate(unittest.TestCase):
 
     def test_gate_yes_allows_application(self):
         from berlin_flat_hunter.applicator import AutoApplicator
-        proc = AutoApplicator(self._make_config(gate_enabled=True))
+        proc = AutoApplicator(self._gate_config(gate_enabled=True))
         proc.gate = MagicMock(should_apply=MagicMock(return_value=True))
         proc.applicators[0].apply = MagicMock(return_value=True)
         proc.applicators[1].apply = MagicMock(return_value=False)

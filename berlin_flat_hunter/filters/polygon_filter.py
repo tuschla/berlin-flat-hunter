@@ -27,7 +27,7 @@ class PolygonFilter(Processor):
         except ImportError as exc:
             raise ImportError("geopy is required for PolygonFilter: pip install geopy") from exc
 
-        coords = config.search_polygon() if hasattr(config, "search_polygon") else []
+        coords = config.search_polygon()
         if len(coords) < 3:
             raise ValueError("search_area.polygon needs at least 3 [lat, lon] points")
         for i, point in enumerate(coords):

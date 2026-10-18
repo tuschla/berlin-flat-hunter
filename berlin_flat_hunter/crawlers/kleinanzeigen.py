@@ -30,19 +30,18 @@ requests — everything ships with the list page.
 """
 import re
 
-import requests
 from bs4 import BeautifulSoup, Tag
 
 from flathunter.crawler.kleinanzeigen import Kleinanzeigen as _UpstreamKleinanzeigen
 from flathunter.logging import logger
+
+from berlin_flat_hunter.crawlers.common import get_with_retry
 
 # "72,13 m²" / "28 m²" — German or plain decimal, tolerant of the trailing unit.
 _SIZE_RE = re.compile(r"\d+(?:[.,]\d+)?\s*m²")
 # "2 Zi." / "1,5 Zi" — room count preceding the Zimmer abbreviation.
 _ROOMS_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*Zi\.?", re.IGNORECASE)
 
-# Module-level session for connection pooling + keep-alive across crawls.
-_SESSION = requests.Session()
 # A real browser UA + German locale is all Kleinanzeigen's list page wants —
 # it serves full server-rendered results to a plain GET from this IP.
 _HEADERS = {
@@ -64,22 +63,14 @@ class Kleinanzeigen(_UpstreamKleinanzeigen):
         ``extract_data`` degrades to ``[]`` rather than raising — the crawl reads
         as a clean empty cycle and the schema monitor / watchdog take over.
         """
-        for attempt in range(2):
-            try:
-                resp = _SESSION.get(search_url, headers=_HEADERS, timeout=30)
-            except requests.exceptions.RequestException as exc:
-                if attempt == 0:
-                    continue
-                logger.warning("Kleinanzeigen: list fetch failed for %s: %s", search_url, exc)
-                return BeautifulSoup("", "lxml")
-            if 500 <= resp.status_code < 600 and attempt == 0:
-                continue
-            if resp.status_code != 200:
-                logger.warning("Kleinanzeigen: list page %s returned HTTP %d",
-                               search_url, resp.status_code)
-                return BeautifulSoup("", "lxml")
-            return BeautifulSoup(resp.content, "lxml")
-        return BeautifulSoup("", "lxml")
+        resp = get_with_retry(search_url, label="Kleinanzeigen", headers=_HEADERS, timeout=30)
+        if resp is None:
+            return BeautifulSoup("", "lxml")
+        if resp.status_code != 200:
+            logger.warning("Kleinanzeigen: list page %s returned HTTP %d",
+                           search_url, resp.status_code)
+            return BeautifulSoup("", "lxml")
+        return BeautifulSoup(resp.content, "lxml")
 
     def extract_data(self, raw_data: BeautifulSoup) -> list:
         # Guard: upstream does ``raw_data.find(id="srchrslt-adtable").find_all(...)``

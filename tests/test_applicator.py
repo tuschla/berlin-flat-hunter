@@ -11,6 +11,7 @@ from berlin_flat_hunter.applicator import (
     WbmApplicator,
     _fill_field,
 )
+from berlin_flat_hunter.config import BerlinConfig
 
 GEWOBAG_EXPOSE = {
     "id": 1,
@@ -49,12 +50,9 @@ APPLICANT = {
 }
 
 
-class FakeConfig:
-    def __init__(self, apply_cfg=None):
-        self.config = {"auto_apply": apply_cfg or {}}
-
-    def applicant_config(self):
-        return APPLICANT
+def _make_config():
+    return BerlinConfig({"auto_apply": {"enabled": True, "dry_run": False},
+                         "applicant": APPLICANT})
 
 
 class TestFillField(unittest.TestCase):
@@ -269,7 +267,7 @@ class TestKleinanzeigenApplicator(unittest.TestCase):
 class TestAutoApplicator(unittest.TestCase):
 
     def setUp(self):
-        self.processor = AutoApplicator(FakeConfig())
+        self.processor = AutoApplicator(_make_config())
 
     def test_has_four_applicators(self):
         self.assertEqual(len(self.processor.applicators), 4)
@@ -351,7 +349,7 @@ class TestStaleApplicatorAlerts(unittest.TestCase):
     def setUp(self):
         self.dispatched: list[list[str]] = []
         self.processor = AutoApplicator(
-            FakeConfig(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
+            _make_config(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
         )
         # Fail every applicator so URL_MATCH counts but no success masks it.
         for app in self.processor.applicators:
@@ -408,7 +406,7 @@ class TestManualApplyNotifications(unittest.TestCase):
     def setUp(self):
         self.dispatched: list[list[str]] = []
         self.processor = AutoApplicator(
-            FakeConfig(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
+            _make_config(), alert_dispatch=lambda msgs: self.dispatched.append(msgs),
         )
 
     def test_recaptcha_dispatches_manual_apply_alert(self):
@@ -456,7 +454,7 @@ class TestManualApplyNotifications(unittest.TestCase):
     def test_no_alert_dispatch_callback_still_logs(self):
         """When alert_dispatch is None the message should still be logged at
         INFO level — the absence of telegram doesn't mean the user gets nothing."""
-        proc = AutoApplicator(FakeConfig(), alert_dispatch=None)
+        proc = AutoApplicator(_make_config(), alert_dispatch=None)
         proc.applicators[0].apply = MagicMock(
             side_effect=ManualApplyRequired("reCAPTCHA"))
         with self.assertLogs("flathunt", level="INFO") as cm:

@@ -240,6 +240,22 @@ class TestSchemaMonitor(unittest.TestCase):
         mon.record_crawl([EXPOSE_OK])
         self.assertEqual(h.consecutive_alerts, 0)
 
+    def test_field_miss_streak_survives_cooldown_hold(self):
+        """While a missing-fields alert is only held back by the cooldown, the
+        streak must not reset (the ladder climbs, the watchdog keeps seeing the
+        crawler as down) and last_success_ts must not move (it keys the
+        watchdog's episode)."""
+        mon, _ = self._new_monitor({"monitoring": {"field_miss_threshold": 0.5}})
+        bad = [EXPOSE_MISSING, EXPOSE_MISSING, EXPOSE_OK]
+        self.assertEqual(len(mon.record_crawl(bad)), 1)
+        self.assertEqual(mon.record_crawl(bad), [])  # held back by the cooldown
+        h = mon._health["Gewobag"]
+        self.assertEqual(h.consecutive_alerts, 1)
+        self.assertEqual(h.last_success_ts, 0.0)
+        mon.record_crawl([EXPOSE_OK])
+        self.assertEqual(h.consecutive_alerts, 0)
+        self.assertGreater(h.last_success_ts, 0.0)
+
     def test_consecutive_alerts_persists_across_reload(self):
         """The exponential cooldown only works if consecutive_alerts survives
         process restart — otherwise every reboot resets to 1h cooldown."""

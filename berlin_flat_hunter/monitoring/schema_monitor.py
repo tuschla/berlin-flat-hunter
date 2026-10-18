@@ -52,7 +52,11 @@ class SchemaMonitor:
     Alert conditions (both configurable in YAML under `monitoring`):
       - consecutive_empty_threshold: alert after N runs with 0 results (default 3)
       - field_miss_threshold: alert if >X fraction of results missing critical fields (default 0.5)
-    Alert cool-down: 1 hour between repeated alerts for the same crawler.
+    Alert cool-down per crawler: ``alert_cooldown_seconds`` (default 1 h),
+    doubling after each alert of a failure streak up to
+    ``alert_cooldown_cap_seconds`` (default 24 h). A streak (and with it
+    ``consecutive_alerts``, which the watchdog reads) ends only on a healthy
+    crawl; ``last_success_ts`` likewise only moves on a healthy crawl.
     """
 
     # Exponential alert cooldown: doubles after each consecutive alert,
@@ -92,13 +96,7 @@ class SchemaMonitor:
         alerts: list[str] = []
         for crawler_name, crawler_exposes in by_crawler.items():
             health = self._get_health(crawler_name)
-            msgs = self._evaluate(crawler_name, crawler_exposes, health)
-            if not msgs:
-                # Healthy cycle resets the alert ladder so the *next* failure
-                # starts back at the 1h cooldown rather than picking up where
-                # the last streak left off.
-                health.consecutive_alerts = 0
-            alerts.extend(msgs)
+            alerts.extend(self._evaluate(crawler_name, crawler_exposes, health))
 
         self._save()
         return alerts
@@ -140,7 +138,6 @@ class SchemaMonitor:
         # _evaluate is only called for crawlers with ≥1 expose; empty runs go through
         # record_empty_crawl. Reset the empty counter and check field completeness.
         health.consecutive_empty = 0
-        health.last_success_ts = time.time()
 
         miss_count = sum(
             1 for e in exposes
@@ -148,6 +145,11 @@ class SchemaMonitor:
         )
         miss_rate = miss_count / len(exposes)
         if miss_rate < self.field_miss_threshold:
+            # Healthy: end the failure streak so the *next* failure starts back
+            # at the base cooldown. Not done while an alert is merely held back
+            # by the cooldown, or the escalation ladder would never climb.
+            health.last_success_ts = time.time()
+            health.consecutive_alerts = 0
             return []
         msg = (
             f"[SCHEMA ALERT] {name}: {miss_count}/{len(exposes)} exposes have empty "

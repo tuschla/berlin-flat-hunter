@@ -3,7 +3,7 @@ and schema change monitoring."""
 import os
 import time
 import traceback
-import zlib
+from functools import cached_property
 
 import requests.exceptions
 import urllib3.exceptions
@@ -13,7 +13,7 @@ from flathunter.captcha.captcha_solver import CaptchaUnsolvableError
 from flathunter.hunter import Hunter
 from flathunter.filter import Filter
 from flathunter.logging import logger
-from flathunter.notifiers import SenderApprise, SenderMattermost, SenderSlack, SenderTelegram
+from flathunter.notifiers import SenderApprise, SenderMattermost, SenderSlack
 from flathunter.processor import ProcessorChain
 from flathunter.webdriver_crawler import WebdriverCrawler
 
@@ -22,64 +22,22 @@ from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
 from berlin_flat_hunter.notify import BerlinNotifier, TelegramNotifier
 from berlin_flat_hunter.ollama_filter import OllamaFilter
-from berlin_flat_hunter.stats import StatsLogger, StatsProcessor
-
-# Non-telegram notifier types are still handled by flathunter's own senders;
-# telegram is handled by BerlinNotifier (per-source routing + heartbeat).
-_EXTRA_NOTIFIERS = {
-    "mattermost": SenderMattermost,
-    "slack": SenderSlack,
-    "apprise": SenderApprise,
-}
 
 # Idle heartbeat cadence: on cycles with no activity, ping the log channel at
 # most this often so it proves the bot is alive without spamming.
 _HEARTBEAT_IDLE_INTERVAL = 3600.0
 
 
-# Berlin public-housing crawlers whose site-provided uid is NOT stable across
-# crawls for the same listing (WBM's data-uid walks 77574→77593→…; Gewobag's
-# openimmo number, Howoge's JSON uid and Gesobau's data-apartment-uid all drift
-# too). The detail URL is the reliable natural key, so for these we derive the
-# id from the URL. Without this the same listing re-notifies and — once
-# auto-apply is live — RE-APPLIES every time its uid changes. (Kleinanzeigen's
-# numeric ad id is stable, degewo already falls back to its slug — not listed.)
-_URL_KEYED_CRAWLERS = frozenset({"Gewobag", "Howoge", "Gesobau", "Wbm"})
+def _telegram_from_config(config: BerlinConfig) -> TelegramNotifier:
+    return TelegramNotifier(config.telegram_bot_token(), config.telegram_receiver_ids())
 
 
-def _url_slug(url: str) -> str:
-    return url.rstrip("/").rsplit("/", 1)[-1] or url
-
-
-def _coerce_expose_id(expose: dict) -> None:
-    """Ensure ``expose['id']`` is a STABLE int-coercible identity, in place.
-
-    Two jobs:
-    1. For crawlers with unstable site uids (``_URL_KEYED_CRAWLERS``), replace the
-       id with ``crc32`` of the detail-URL slug so the same listing keeps one
-       identity across crawls (dedup / already-seen / apply-dedup all key on id).
-    2. Otherwise, keep an int id as-is, but map any non-numeric id (e.g. a raw
-       Gewobag openimmo string) to a stable crc32 int — flathunter's
-       ``IdMaintainer.save_expose`` does ``int(expose['id'])`` and would crash
-       the whole chain on a non-numeric value.
-    """
-    crawler = expose.get("crawler", "")
-    url = str(expose.get("url", "") or "")
-    if crawler in _URL_KEYED_CRAWLERS and url:
-        expose["id"] = zlib.crc32(_url_slug(url).encode("utf-8"))
-        return
-    raw = expose.get("id")
-    try:
-        int(raw)
-        return
-    except (TypeError, ValueError):
-        pass
-    basis = str(raw) if raw not in (None, "") else url
-    expose["id"] = zlib.crc32(basis.encode("utf-8"))
-
+# Builders for the `.notify(message)` alert channels (schema alerts, manual-apply
+# alerts). Per-listing telegram goes through BerlinNotifier instead; the other
+# types are flathunter's senders, which serve both roles.
 _NOTIFIER_BUILDERS = {
     "apprise": SenderApprise,
-    "telegram": SenderTelegram,
+    "telegram": _telegram_from_config,
     "mattermost": SenderMattermost,
     "slack": SenderSlack,
 }
@@ -116,8 +74,6 @@ class BerlinHunter(Hunter):
         self.berlin_config = config
 
         state_dir = os.path.dirname(config.database_location()) or "."
-        state_path = os.path.join(state_dir, "schema_monitor.json")
-        self.schema_monitor = SchemaMonitor(state_path, config.config)
 
         # Stateful processors: build once, reuse across hunt cycles.
         self._polygon_filter = None
@@ -155,9 +111,8 @@ class BerlinHunter(Hunter):
         # _dispatch_alerts as a callback) has a populated list ready by the
         # time it fires its first stale-selector or [MANUAL APPLY] alert.
         # `monitoring.alert_notifiers` overrides which notifiers fire for
-        # alerts only — useful when per-expose notifications are off
-        # (`notifiers: []`) but you still want Telegram pings on broken
-        # crawlers / manual-apply situations.
+        # alerts only: a profile with `notifiers: []` gets no per-listing
+        # messages but can still get crawler-down / manual-apply alerts.
         self._alert_notifiers: list = []
         mon_cfg = config.monitoring_config()
         if mon_cfg.get("alert_via_notifiers", False):
@@ -175,8 +130,8 @@ class BerlinHunter(Hunter):
         # Per-profile identity + optional state DB for addy alias caching and
         # IMAP dedup. profile_name doubles as the Store user_id.
         self.profile_name = os.path.basename(state_dir) or "default"
-        alias_cfg = config.email_alias_config() if hasattr(config, "email_alias_config") else {}
-        self._imap_cfg = config.email_imap_config() if hasattr(config, "email_imap_config") else {}
+        alias_cfg = config.email_alias_config()
+        self._imap_cfg = config.email_imap_config()
         self._store = None
         self._alias_resolver = None
         if (alias_cfg.get("provider", "none") != "none") or self._imap_cfg.get("enabled"):
@@ -195,21 +150,22 @@ class BerlinHunter(Hunter):
 
         # Per-source Telegram routing + optional heartbeat/log channel. Replaces
         # flathunter's built-in telegram sender; backward compatible with a plain
-        # single-bot `telegram:` config.
+        # single-bot `telegram:` config. Per-listing messages are only sent when
+        # `telegram` is in `notifiers`; the heartbeat channel works either way.
         self._notifier = BerlinNotifier(config)
         self._last_heartbeat_ts = 0.0
-
-        self._stats_processor = None
-        if config.stats_enabled():
-            stats_path = config.stats_db_path() or os.path.join(state_dir, "stats.db")
-            self.stats = StatsLogger(stats_path)
-            self._stats_processor = StatsProcessor(self.stats)
-        else:
-            self.stats = None
 
         # Per-searcher monotonic timestamp of the last driver tear-down so
         # _recycle_driver can rate-limit rebuilds on a permanently-broken site.
         self._driver_last_recycled: dict[str, float] = {}
+
+    @cached_property
+    def schema_monitor(self) -> SchemaMonitor:
+        """Crawl-health state, next to the DB. Built on first use, so it only
+        exists for whoever crawls (the shared-scrape lead, or a single-profile
+        run); profile hunters fed by the orchestrator never create one."""
+        state_dir = os.path.dirname(self.config.database_location()) or "."
+        return SchemaMonitor(os.path.join(state_dir, "schema_monitor.json"), self.config.config)
 
     # ------------------------------------------------------------------
     # Selenium driver lifecycle — recycling on wedge / dead session.
@@ -367,12 +323,6 @@ class BerlinHunter(Hunter):
             raw_exposes = [e for e in raw_exposes
                            if e.get("crawler") in self._enabled_sources]
 
-        # Normalise ids so flathunter's int(id) in save_expose can't crash the
-        # chain on a string-id crawler (Gewobag/degewo). Idempotent, so running
-        # it per profile on the shared pool is harmless.
-        for expose in raw_exposes:
-            _coerce_expose_id(expose)
-
         filter_set = Filter.builder() \
                            .read_config(self.config) \
                            .filter_already_seen(self.id_watch) \
@@ -383,9 +333,6 @@ class BerlinHunter(Hunter):
                                 .apply_filter(filter_set) \
                                 .resolve_addresses() \
                                 .calculate_durations()
-
-        if self._stats_processor is not None:
-            builder.processors.append(self._stats_processor)
 
         if self._scam_filter is not None:
             builder.processors.append(self._scam_filter)
@@ -400,13 +347,13 @@ class BerlinHunter(Hunter):
         if self._wbs_filter is not None:
             builder.processors.append(self._wbs_filter)
 
-        # Notification: BerlinNotifier owns telegram (per-source bots + heartbeat);
-        # any other configured notifier type still goes through flathunter.
-        builder.processors.append(self._notifier)
+        # Per-listing notification, only for the types listed in `notifiers`:
+        # BerlinNotifier owns telegram (per-source bots); the rest are flathunter's.
         for name in self.config.notifiers():
-            extra = _EXTRA_NOTIFIERS.get(name)
-            if extra is not None:
-                builder.processors.append(extra(self.config))
+            if name == "telegram":
+                builder.processors.append(self._notifier)
+            elif name in _NOTIFIER_BUILDERS:
+                builder.processors.append(_NOTIFIER_BUILDERS[name](self.config))
 
         if self._auto_applicator is not None:
             builder.processors.append(self._auto_applicator)
@@ -451,10 +398,7 @@ class BerlinHunter(Hunter):
             return
         uid = self.profile_name
         store = self._store
-        notifier = TelegramNotifier(
-            self.config.telegram_bot_token() or "",
-            [str(i) for i in (self.config.telegram_receiver_ids() or [])],
-        )
+        notifier = _telegram_from_config(self.config)
         for mid, sender, subject, snippet in replies:
             if store and store.was_email_notified(uid, mid):
                 continue
@@ -497,12 +441,10 @@ class BerlinHunter(Hunter):
         """
         alerts = list(self.schema_monitor.record_crawl(raw_exposes))
         seen = {e.get("crawler") for e in raw_exposes}
-        # Strict `is True` — MagicMock searchers in tests auto-create truthy
-        # attribute values, which would otherwise mark every crawler as empty.
         site_empty_names = {
             searcher.get_name()
             for searcher in self.config.searchers()
-            if getattr(searcher, "last_crawl_site_reported_empty", False) is True
+            if getattr(searcher, "last_crawl_site_reported_empty", False)
         }
         for name in self._configured_crawler_names():
             if name in seen:
@@ -554,8 +496,8 @@ class BerlinHunter(Hunter):
                                    type(notifier).__name__, exc)
 
     def close(self):
-        """Release stats DB and any applicator drivers. Idempotent and safe even
-        if __init__ did not finish (uses getattr defaults).
+        """Release the state DB and any applicator drivers. Idempotent and safe
+        even if __init__ did not finish (uses getattr defaults).
         """
         applicator = getattr(self, "_auto_applicator", None)
         if applicator is not None:
@@ -563,12 +505,6 @@ class BerlinHunter(Hunter):
                 applicator.close()
             except Exception as exc:
                 logger.warning("AutoApplicator close failed: %s", exc)
-        stats = getattr(self, "stats", None)
-        if stats is not None:
-            try:
-                stats.close()
-            except Exception as exc:
-                logger.warning("Stats close failed: %s", exc)
         store = getattr(self, "_store", None)
         if store is not None:
             try:

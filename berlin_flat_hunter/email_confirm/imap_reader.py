@@ -87,6 +87,17 @@ def _looks_like_confirm(url: str) -> bool:
     return any(tok in low for tok in _CONFIRM_TOKENS)
 
 
+def _from_any(domains: tuple[str, ...]) -> list[str]:
+    """IMAP search keys matching mail FROM any of ``domains``:
+    ``OR FROM "a" OR FROM "b" FROM "c"`` (IMAP's OR takes exactly two keys)."""
+    keys: list[str] = []
+    for i, domain in enumerate(domains):
+        if i < len(domains) - 1:
+            keys.append("OR")
+        keys += ["FROM", f'"{domain}"']
+    return keys
+
+
 def _body_text(msg: Message) -> str:
     """Concatenate text/plain + text/html parts as best-effort decoded text."""
     parts: list[str] = []
@@ -214,28 +225,32 @@ class ImapConfirmer:
             conn = imaplib.IMAP4(self._host, self._port, timeout=self.timeout)
         try:
             conn.login(self._username, self._password)
-            conn.select(self._mailbox)
+            # Read-only + BODY.PEEK[]: scanning must never mark the user's mail
+            # as read (this runs every cycle against their real inbox).
+            conn.select(self._mailbox, readonly=True)
 
-            # Search by date window. IMAP SINCE wants a DD-Mon-YYYY date.
+            # Search by date window, and let the server pick only mail from the
+            # Genossenschaft domains. IMAP SINCE wants a DD-Mon-YYYY date.
             import datetime
 
             since = (
                 datetime.date.today()
                 - datetime.timedelta(days=max(1, self._lookback_days))
             ).strftime("%d-%b-%Y")
-            typ, data = conn.search(None, "SINCE", since)
+            typ, data = conn.search(None, "SINCE", since, *_from_any(_GENO_DOMAINS))
             if typ != "OK" or not data or not data[0]:
                 return results, replies
             ids = data[0].split()
 
             seen_urls: set[str] = set()
             for msg_id in ids:
-                typ, raw = conn.fetch(msg_id, "(RFC822)")
+                typ, raw = conn.fetch(msg_id, "(BODY.PEEK[])")
                 if typ != "OK" or not raw or not raw[0]:
                     continue
                 msg = email.message_from_bytes(raw[0][1])
                 sender = _decode(msg.get("From", ""))
-                # Only consider mails from a known Genossenschaft domain.
+                # Server FROM matching is a substring match on the raw header;
+                # re-check the decoded sender.
                 if not any(d in sender.lower() for d in _GENO_DOMAINS):
                     continue
                 subject = _decode(msg.get("Subject", ""))

@@ -5,7 +5,8 @@
 # GitHub Actions on every push to main):
 #   hunter    long-running shared-scrape loop: python main.py --hunter /app/hunter.yaml
 #   watchdog  supercronic running deploy/crontab: crawler watchdog every 15 min
-#             (Telegram + ntfy alerts), stale-job check every 30 min. Its
+#             (stalled hunter → Telegram + ntfy, crawler down → ntfy),
+#             stale-job check every 30 min. Its
 #             healthcheck turns unhealthy when the watchdog job goes stale.
 #
 # Datasets (owner 568:568 = apps, mode 0750; config files 0600):

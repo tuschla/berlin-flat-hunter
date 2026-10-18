@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.ollama_filter import OllamaFilter
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -20,15 +21,14 @@ EXPOSE = {
 }
 
 
-class FakeConfig:
-    def ollama_config(self):
-        return {"url": OLLAMA_URL, "model": "llama3"}
+def _make_config(ollama_cfg):
+    return BerlinConfig({"ollama": ollama_cfg})
 
 
 class TestOllamaFilter(unittest.TestCase):
 
     def setUp(self):
-        self.fltr = OllamaFilter(FakeConfig())
+        self.fltr = OllamaFilter(_make_config({"url": OLLAMA_URL, "model": "llama3"}))
 
     def _mock_response(self, text):
         resp = MagicMock()
@@ -92,23 +92,17 @@ class TestOllamaFilter(unittest.TestCase):
         self.assertIn("Schöne 2-Zimmer-Wohnung", prompt)
 
     def test_default_url_used_without_config(self):
-        cfg = MagicMock()
-        cfg.ollama_config.return_value = {}
-        fltr = OllamaFilter(cfg)
+        fltr = OllamaFilter(_make_config({}))
         self.assertEqual(fltr.url, OllamaFilter.DEFAULT_URL)
 
     def test_custom_prompt_template(self):
-        cfg = MagicMock()
-        cfg.ollama_config.return_value = {"prompt": "Is this good? {expose}"}
-        fltr = OllamaFilter(cfg)
+        fltr = OllamaFilter(_make_config({"prompt": "Is this good? {expose}"}))
         self.assertIn("{expose}", fltr.prompt_template)
 
     def test_invalid_prompt_template_raises(self):
         """A bad placeholder (e.g. {title}) must fail fast at construct time."""
-        cfg = MagicMock()
-        cfg.ollama_config.return_value = {"prompt": "Apply? {title} {expose}"}
         with self.assertRaises(ValueError):
-            OllamaFilter(cfg)
+            OllamaFilter(_make_config({"prompt": "Apply? {title} {expose}"}))
 
     @patch("berlin_flat_hunter.ollama_client.requests.post")
     def test_empty_response_keeps_expose_fail_open(self, mock_post):

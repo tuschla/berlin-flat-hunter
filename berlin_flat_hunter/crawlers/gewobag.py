@@ -3,15 +3,17 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
-import requests
 from bs4 import BeautifulSoup, Tag
 
 from flathunter.abstract_crawler import Crawler
 from flathunter.logging import logger
 
-# Module-level Session: connection pooling + keep-alive across crawls.
-# requests.Session() is thread-safe enough for concurrent GETs to the same host.
-_SESSION = requests.Session()
+from berlin_flat_hunter.crawlers.common import (
+    amount_or_empty,
+    get_with_retry,
+    listing_id,
+    normalise,
+)
 
 WP_API_URL = "https://www.gewobag.de/wp-json/wp/v2/immobilien"
 
@@ -33,15 +35,6 @@ _SKIP_KEYWORDS = frozenset([
     "gewerbe", "buero", "praxis", "laden", "lager",
 ])
 
-_WHITESPACE_RE = re.compile(r"\s+")
-# A real rent value contains a digit; teaser listings show "Auf Anfrage" here.
-_HAS_AMOUNT = re.compile(r"\d")
-
-
-def _normalise(text: str) -> str:
-    """Collapse all internal whitespace runs (incl. tabs/newlines) into single spaces."""
-    return _WHITESPACE_RE.sub(" ", text).strip()
-
 
 class Gewobag(Crawler):
 
@@ -49,7 +42,9 @@ class Gewobag(Crawler):
 
     def get_results(self, search_url: str, max_pages: Optional[int] = None) -> list:
         items = self._fetch_index(max_pages)
-        apartments = [i for i in items if self._is_apartment(i)]
+        # One detail fetch per URL: the id is derived from it, so a listing the
+        # index repeats (pages shifting mid-crawl) would otherwise come back twice.
+        apartments = list({i.get("link"): i for i in items if self._is_apartment(i)}.values())
         entries: list = []
         with ThreadPoolExecutor(max_workers=5) as pool:
             futures = {pool.submit(self._fetch_detail, item): item for item in apartments}
@@ -66,8 +61,11 @@ class Gewobag(Crawler):
         items: list = []
         page = 1
         while True:
-            resp = self._fetch_with_retry(
+            resp = get_with_retry(
                 WP_API_URL,
+                label="Gewobag",
+                headers=self.HEADERS,
+                timeout=20,
                 params={"per_page": 100, "page": page, "status": "publish"},
             )
             if resp is None or resp.status_code != 200:
@@ -106,31 +104,12 @@ class Gewobag(Crawler):
         return (text
                 .replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
 
-    def _fetch_with_retry(self, url: str, params: Optional[dict] = None):
-        """GET ``url`` with one retry on 5xx / transient network failure.
-        Returns the final Response (which may still be non-200) or None on hard failure.
-        """
-        for attempt in range(2):
-            try:
-                resp = _SESSION.get(url, params=params, headers=self.HEADERS, timeout=20)
-            except requests.exceptions.RequestException as exc:
-                if attempt == 0:
-                    logger.debug("Gewobag transient %s fetch error, retrying: %s", url, exc)
-                    continue
-                logger.warning("Gewobag could not fetch %s: %s", url, exc)
-                return None
-            if 500 <= resp.status_code < 600 and attempt == 0:
-                continue  # one retry for transient server errors
-            return resp
-        return None
-
     def _fetch_detail(self, item: dict) -> Optional[dict]:
         url = item.get("link", "")
-        uid = item.get("id")
         title = self._title(item)
-        if not url or uid is None:
+        if not url:
             return None
-        resp = self._fetch_with_retry(url)
+        resp = get_with_retry(url, label="Gewobag", headers=self.HEADERS, timeout=20)
         if resp is None or resp.status_code != 200:
             if resp is not None:
                 logger.debug("Gewobag detail %s returned HTTP %d", url, resp.status_code)
@@ -148,8 +127,8 @@ class Gewobag(Crawler):
                 td = row.find("td")
                 if not th or not td:
                     continue
-                label = _normalise(th.get_text(" ", strip=True)).lower()
-                value = _normalise(td.get_text(" ", strip=True))
+                label = normalise(th.get_text(" ", strip=True)).lower()
+                value = normalise(td.get_text(" ", strip=True))
                 if "grundmiete" in label:
                     grundmiete = value
                 elif "gesamtmiete" in label:
@@ -161,13 +140,14 @@ class Gewobag(Crawler):
                 elif "fläche" in label:
                     size = value
 
-        # Prefer Grundmiete (Kaltmiete) over Gesamtmiete regardless of row order
-        price = grundmiete or gesamtmiete
         # Keep the cold/warm split for data analysis, but only when the value is
         # a real amount — teaser listings render "Auf Anfrage" here, and storing
         # that would block the re-sight backfill once the real figure appears.
-        price_cold = grundmiete if _HAS_AMOUNT.search(grundmiete) else ""
-        price_warm = gesamtmiete if _HAS_AMOUNT.search(gesamtmiete) else ""
+        price_cold = amount_or_empty(grundmiete)
+        price_warm = amount_or_empty(gesamtmiete)
+        # ``price`` is the warm rent like every other source; Grundmiete only
+        # when Gesamtmiete carries no amount.
+        price = price_warm or price_cold
 
         og_img = soup.find("meta", property="og:image")
         image = ""
@@ -176,7 +156,7 @@ class Gewobag(Crawler):
             image = content if isinstance(content, str) else ""
 
         return {
-            "id": uid,
+            "id": listing_id(url),
             "url": url,
             "title": title,
             "address": address,

@@ -1,19 +1,23 @@
 """StatsLogger — SQLite-backed statistics about unique apartment notices"""
+import re
 import sqlite3
 import threading
 import time
 
-from flathunter.abstract_processor import Processor
 from flathunter.logging import logger
 
 # Free-text content columns carried per notice, in a stable order. Used to build
-# the INSERT column list and to drive the re-sight backfill. ``price`` stays the
-# legacy single value (what the notifier shows); ``price_cold``/``price_warm``
-# hold the Kaltmiete/Warmmiete split for crawlers that expose it (Gewobag).
+# the INSERT column list and to drive the re-sight backfill. ``price`` is what
+# the notifier shows (the warm rent where the source gives one);
+# ``price_cold``/``price_warm`` hold the Kaltmiete/Warmmiete split where known.
 _CONTENT_COLS = (
     "url", "title", "address", "rooms", "size",
     "price", "price_cold", "price_warm",
 )
+_PRICE_COLS = frozenset({"price", "price_cold", "price_warm"})
+# A price without a digit ("Auf Anfrage", "Zu verschenken") is a placeholder,
+# not an amount: the backfill replaces it once a real figure appears.
+_HAS_DIGIT = re.compile(r"\d")
 
 # Composite primary key (id, crawler) — different crawlers mint independent IDs
 # and a numeric collision across two sites must NOT silently drop a notice.
@@ -108,8 +112,9 @@ class StatsLogger:
     def _backfill(self, exp_id, crawler: str, vals: dict, now: float) -> None:
         """Fill empty columns of an existing row from ``vals``; bump last_seen_ts.
 
-        Only columns that are currently empty/NULL and have a non-empty fresh
-        value are touched — first-seen values are preserved.
+        Only columns that are currently empty/NULL (or, for prices, hold text
+        without any digit) and have a non-empty fresh value are touched —
+        first-seen values are preserved.
         """
         row = self._conn.execute(
             f"SELECT {','.join(_CONTENT_COLS)} FROM notices WHERE id=? AND crawler=?",
@@ -121,7 +126,7 @@ class StatsLogger:
         fills = {
             col: vals[col]
             for col in _CONTENT_COLS
-            if not (existing[col] or "").strip() and vals[col].strip()
+            if _is_blank(col, existing[col]) and not _is_blank(col, vals[col])
         }
         set_parts = ["last_seen_ts=?"]
         params: list = [now]
@@ -181,16 +186,8 @@ class StatsLogger:
             pass
 
 
-class StatsProcessor(Processor):
-    """Processor that logs each expose to a StatsLogger (non-destructive)."""
-
-    def __init__(self, logger_instance: StatsLogger):
-        self.stats = logger_instance
-
-    def process_expose(self, expose: dict) -> dict:
-        try:
-            if self.stats.log(expose):
-                logger.debug("Stats: new notice logged id=%s", expose.get("id"))
-        except Exception as exc:
-            logger.warning("Stats log failed for %s: %s", expose.get("url"), exc)
-        return expose
+def _is_blank(col: str, value) -> bool:
+    text = (value or "").strip()
+    if col in _PRICE_COLS:
+        return not _HAS_DIGIT.search(text)
+    return not text

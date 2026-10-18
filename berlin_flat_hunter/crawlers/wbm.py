@@ -7,6 +7,13 @@ from bs4 import BeautifulSoup, Tag
 from flathunter.abstract_crawler import Crawler
 from flathunter.logging import logger
 
+from berlin_flat_hunter.crawlers.common import (
+    absolute_url,
+    amount_or_empty,
+    listing_id,
+    str_attr,
+)
+
 BASE_URL = "https://www.wbm.de"
 
 
@@ -29,6 +36,7 @@ class Wbm(Crawler):
 
     def get_results(self, search_url: str, max_pages: Optional[int] = None) -> list:
         entries: list = []
+        seen: set = set()
         self.last_crawl_site_reported_empty = False
         page_no = 1
         while True:
@@ -41,7 +49,10 @@ class Wbm(Crawler):
             page_entries = self.extract_data(soup)
             if not page_entries:
                 break
-            entries.extend(page_entries)
+            for entry in page_entries:
+                if entry["id"] not in seen:
+                    seen.add(entry["id"])
+                    entries.append(entry)
             if max_pages is not None and page_no >= max_pages:
                 break
             if not self._has_next(soup, page_no):
@@ -84,38 +95,12 @@ class Wbm(Crawler):
         el = parent.find(class_=cls)
         return el.get_text(strip=True) if el else ""
 
-    @staticmethod
-    def _str_attr(tag: Tag, name: str) -> str:
-        """Safely return a string attribute (BeautifulSoup may return list for multi-value attrs)."""
-        value = tag.get(name, "")
-        if isinstance(value, list):
-            return value[0] if value else ""
-        return value if isinstance(value, str) else ""
-
-    @classmethod
-    def _absolute_url(cls, href: str) -> str:
-        if not href:
-            return ""
-        if href.startswith("http"):
-            return href
-        # Protocol-relative URL (//cdn/...) — keep host but use https.
-        if href.startswith("//"):
-            return f"https:{href}"
-        return BASE_URL + href if href.startswith("/") else f"{BASE_URL}/{href}"
-
     def _parse_item(self, item: Tag) -> dict | None:
-        # NB: WBM's ``data-uid`` is NOT a stable identity — it changes for the
-        # same listing every day or two. We keep it only as a "this is a real
-        # listing card" signal; the stable identity is derived centrally from the
-        # detail URL in ``BerlinHunter._coerce_expose_id`` (_URL_KEYED_CRAWLERS).
-        uid_str = self._str_attr(item, "data-uid")
-        if not uid_str:
+        # WBM's ``data-uid`` changes for the same listing every day or two, so it
+        # is only kept as the "this is a real listing card" marker; the id is
+        # derived from the detail URL.
+        if not str_attr(item, "data-uid"):
             return None
-        try:
-            uid = int(uid_str)
-        except ValueError:
-            uid = uid_str
-
         title = self._text(item, "imageTitle")
         if not title:
             return None
@@ -123,22 +108,26 @@ class Wbm(Crawler):
         anchor = item.find("a", class_="immo-button-cta") or item.find("a", href=True)
         if not anchor or not isinstance(anchor, Tag):
             return None
-        href = self._str_attr(anchor, "href")
-        if not href:
+        url = absolute_url(BASE_URL, str_attr(anchor, "href"))
+        if not url:
             return None
 
         img_wrap = item.find(class_="imgWrap")
-        img_src = self._str_attr(img_wrap, "data-img-src") if isinstance(img_wrap, Tag) else ""
+        img_src = str_attr(img_wrap, "data-img-src") if isinstance(img_wrap, Tag) else ""
 
+        # main-property-rent is labelled "Warmmiete" on the card.
+        price = amount_or_empty(self._text(item, "main-property-rent"))
         return {
-            "id": uid,
-            "url": self._absolute_url(href),
-            "image": self._absolute_url(img_src) if img_src else "",
+            "id": listing_id(url),
+            "url": url,
+            "image": absolute_url(BASE_URL, img_src),
             "title": title,
             "address": self._text(item, "address"),
             "rooms": self._text(item, "main-property-rooms"),
             "size": self._text(item, "main-property-size"),
-            "price": self._text(item, "main-property-rent"),
+            "price": price,
+            "price_cold": "",
+            "price_warm": price,
             "crawler": self.get_name(),
         }
 
@@ -149,6 +138,6 @@ class Wbm(Crawler):
         # Match page number with end-of-value or non-digit boundary so page=2 doesn't match page=20.
         pattern = re.compile(rf"[?&]page={current_page + 1}(?:&|$|#)")
         for link in pagination.find_all("a"):
-            if isinstance(link, Tag) and pattern.search(self._str_attr(link, "href")):
+            if isinstance(link, Tag) and pattern.search(str_attr(link, "href")):
                 return True
         return False

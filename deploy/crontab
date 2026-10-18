@@ -1,8 +1,9 @@
 # Crontab for the `watchdog` service (supercronic, TZ=Europe/Berlin, cwd /app).
 # The hunter itself is a long-running loop in the `hunter` service, not a cron job.
 
-# Crawler watchdog: Telegram + ntfy alert when a crawler is down or the hunter
-# has not completed a crawl cycle for 30 min. Stale after 1 h without a clean run.
+# Crawler watchdog: Telegram + ntfy alert when the hunter has not completed a
+# crawl cycle for 30 min; crawler-down copied to ntfy (the hunter alerts
+# Telegram itself). Stale after 1 h without a clean run.
 */15 * * * * /app/deploy/run-job.sh watchdog 3600 -- python scripts/crawler_watchdog.py
 
 # Alert once if a job above has not succeeded within its max age.

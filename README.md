@@ -43,8 +43,8 @@ python main.py --config config.yaml
 
 ## Multiple search profiles (shared scraping — recommended)
 
-Each profile is an independent YAML config with its own DB, stats, filters,
-telegram and auto-apply. To run several without re-crawling each source per
+Each profile is an independent YAML config with its own DB, filters, telegram
+and auto-apply. To run several without re-crawling each source per
 profile, list them in a top-level `hunter.yaml` (see `hunter.yaml.example`) and
 run one process:
 
@@ -55,9 +55,11 @@ python main.py --hunter hunter.yaml
 One *lead* scraper crawls the **union** of all profiles' URLs once per cycle
 (one shared `schema_monitor.json`), then fans the identical exposes out to each
 profile's own filter → notify → apply pipeline. Each profile keeps its own
-`database_location` (so "already seen"/notification dedup is independent). Adding
-a profile is one line in `hunter.yaml`; the crawl cost stays flat. One failing
-profile never sinks the cycle.
+`database_location` (so "already seen"/notification dedup is independent) and
+only sees the sources it lists in its own `urls`, so the crawl covers exactly
+those (a leftover `global.urls` is ignored with a warning). Adding a profile is
+one line in `hunter.yaml`; the crawl cost stays flat. One failing profile never
+sinks the cycle.
 
 Single-profile mode still works for one-off runs:
 
@@ -87,12 +89,14 @@ are in [`deploy/README.md`](deploy/README.md).
   | When | Job | Stale after |
   |---|---|---|
   | always | `hunter`: `python main.py --hunter /app/hunter.yaml` (sleeps `loop.sleeping_time` between crawls) | – |
-  | every 15 min | `watchdog`: `scripts/crawler_watchdog.py` (crawler down / hunter stalled) | 1 h |
+  | every 15 min | `watchdog`: `scripts/crawler_watchdog.py` (hunter stalled; crawler down → ntfy) | 1 h |
   | every 30 min | `run-job.sh --check-stale` | – |
 
 - **Alerts:**
-  - The watchdog sends crawler-down and stall alerts to `hunter.yaml`'s
-    `global.telegram` and to ntfy (`NTFY_URL`).
+  - Crawler-down alerts come from the hunter itself: `global.telegram` plus
+    every profile's bot (`global.monitoring.alert_via_notifiers: true`).
+  - The watchdog alerts `global.telegram` and ntfy (`NTFY_URL`) when the hunter
+    has stalled, and copies crawler-down to ntfy only (never Telegram again).
   - `deploy/run-job.sh` POSTs to ntfy when a cron job fails, and once per
     episode when a job has not succeeded within its max age.
   - The `watchdog` healthcheck goes unhealthy while a job is stale.
@@ -108,7 +112,8 @@ are in [`deploy/README.md`](deploy/README.md).
 | Gewobag | ✅ ~36 listings | ⚠ form is an `app.wohnungshelden.de` Angular/NG-ZORRO SPA loaded via `iframe#contact-iframe`. We extract the iframe `src` and drive the SPA standalone, filling 9 fields (firstName/lastName/email/phoneNumber/message + street/houseNumber/zipCode/city). **Live submit is blocked by reCAPTCHA** — the applicator detects and aborts cleanly, logging the reason. `dry_run: true` works end-to-end (verified live 2026-04-28). |
 | WBM | ✅ 7 listings | ⚠ powermail form requires WBS info + privacy checkbox; we fill basic contact fields only. **Use `dry_run: true` first.** |
 | Howoge | ✅ via TYPO3 JSON endpoint | ✅ HTTP-only POST to the TYPO3 ext:HowRealestate `doiSend` form (firstName/lastName/email + harvested cHash + `__trustedProperties`). Triggers double-opt-in email; user clicks the confirmation link to finalise. No JS / captcha as of 2026-05. |
-| Gesobau | ✅ 6 listings | not implemented |
+| Gesobau | ✅ follows the `tx_solr[page]` pagination | not implemented |
+| degewo | ✅ crawled in the page's own Warmmiete sort (the default sort's pages overlap) | not implemented |
 | Kleinanzeigen | ✅ 27 listings | ⚠ requires login; selectors are best-effort. **Use `dry_run: true` first.** |
 | ImmobilienScout24 | ✅ via flathunter | ❌ not implemented (heavy anti-bot) |
 | Immowelt | ❌ DataDome 403 — flathunter HTTP-only crawler can't bypass currently | ❌ not implemented |
@@ -143,27 +148,34 @@ This repo adds:
 
 | Site | Coverage | Stats | Auto-apply |
 |---|---|---|---|
-| Gewobag | Berlin public housing — biggest landlord | ✅ | ✅ |
+| Gewobag | Berlin public housing — biggest landlord | ✅ | ⚠ live submit blocked by reCAPTCHA |
 | WBM | Berlin Mitte public housing | ✅ | ✅ |
 | Howoge | Berlin east public housing | ✅ | ✅ |
 | Gesobau | Berlin north public housing | ✅ |  |
+| degewo | Berlin public housing | ✅ |  |
+
+Every crawler of this repo derives a listing's id from its detail URL
+(`berlin_flat_hunter/crawlers/common.py: listing_id`), because the sites' own
+uids change for the same listing. `price` is the warm rent (Warmmiete /
+Gesamtmiete) wherever the site gives one, or empty when the site shows no
+amount ("Auf Anfrage"); `price_cold` / `price_warm` hold the split where known.
 
 ### Other Berlin public housing (not yet supported)
 
 These sites are JS-rendered SPAs and would need Selenium-based crawlers
 (non-trivial to add):
 
-- **Degewo** — biggest Berlin public landlord besides Gewobag
 - **Stadt und Land, WBG 1892, Berlinovo** — smaller Berlin public housing
 
 PRs welcome.
 
 ## Statistics
 
-When `statistics.enabled: true` in config, every unique notice (deduped by id)
-is logged to a SQLite DB with timestamps. Works for **every crawler** (both
-flathunter built-ins and ours) since the `StatsProcessor` runs in the pipeline
-after dedup and filtering.
+In shared-scrape mode (`--hunter`) every listing of every crawl is logged once
+to `stats.db` next to `global.database_location` (`global.statistics`, on by
+default; `db_path` overrides the location): first and last sighting, plus
+title/address/rooms/size/price/price_cold/price_warm. A field that was empty at
+first sight (or a price without an amount) is filled in on a later sighting.
 
 Query from Python:
 
@@ -184,14 +196,22 @@ The `SchemaMonitor` watches for two failure modes per crawler:
 2. **Field misses** — >X% of results missing `title`/`url`/`address`/`price` (default 50%) → alert
 
 Alerts log at ERROR level (visible in any log setup). State persists in
-`schema_monitor.json` next to the DB. Cool-down: 1 hour between repeat alerts
-per crawler.
+`schema_monitor.json` next to the DB. Cool-down per crawler: 1 h
+(`alert_cooldown_seconds`), doubling with each alert of the same failure streak
+up to 24 h (`alert_cooldown_cap_seconds`); only a healthy crawl ends a streak.
 
 ### Routing alerts to Telegram / Slack / Apprise
 
-Set `monitoring.alert_via_notifiers: true`. Schema alerts are then pushed
-through whichever notifier names appear under `notifiers:` in your config —
-re-using your existing Telegram bot, Apprise URLs, Slack webhook, etc.
+Set `monitoring.alert_via_notifiers: true`. Alerts (schema alerts in
+single-profile mode, auto-apply alerts) are then pushed through the notifier
+names under `monitoring.alert_notifiers`, or under `notifiers:` when that is
+unset — re-using your existing Telegram bot, Apprise URLs, Slack webhook, etc.
+`notifiers:` alone decides where *listings* go: with `notifiers: []` a profile
+gets no per-listing messages but still gets alerts through `alert_notifiers`.
+
+In shared-scrape mode crawler-down alerts come from `hunter.yaml`'s
+`global.monitoring.alert_via_notifiers: true` and go to `global.telegram` plus
+every profile's own Telegram bot (each chat once).
 
 ```yaml
 notifiers: [apprise, telegram]
@@ -232,8 +252,8 @@ Both default to fail-open (keep/apply) when Ollama is unreachable.
 ## Type checking & tests
 
 ```bash
-.venv/bin/python -m pyright   # 0 errors
-.venv/bin/python -m pytest    # 132+ tests
+.venv/bin/python -m pyright
+uv run --frozen pytest -q     # also run by CI before every image build
 ```
 
 ## License

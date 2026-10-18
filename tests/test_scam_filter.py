@@ -1,15 +1,12 @@
 """Tests for ScamFilter — keyword denylist for kleinanzeigen exposes"""
 import unittest
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.filters.scam_filter import DEFAULT_PATTERNS, ScamFilter
 
 
-class FakeConfig:
-    def __init__(self, cfg=None):
-        self._cfg = cfg or {"enabled": True}
-
-    def scam_filter_config(self):
-        return self._cfg
+def _make_config(cfg=None):
+    return BerlinConfig({"scam_filter": cfg or {"enabled": True}})
 
 
 def _ka(title="Wohnung in Berlin", address="Beispielstraße 1, 10115 Berlin",
@@ -22,7 +19,7 @@ def _ka(title="Wohnung in Berlin", address="Beispielstraße 1, 10115 Berlin",
 class TestScamFilter(unittest.TestCase):
 
     def setUp(self):
-        self.f = ScamFilter(FakeConfig())
+        self.f = ScamFilter(_make_config())
 
     def test_passes_clean_listing(self):
         out = list(self.f.process_exposes([_ka()]))
@@ -43,7 +40,7 @@ class TestScamFilter(unittest.TestCase):
         self.assertEqual(out, [])
 
     def test_email_flag_disabled_keeps_listing(self):
-        f = ScamFilter(FakeConfig({"enabled": True, "flag_email_in_title": False}))
+        f = ScamFilter(_make_config({"enabled": True, "flag_email_in_title": False}))
         out = list(f.process_exposes([_ka(title="Kontakt: scammer@example.com")]))
         self.assertEqual(len(out), 1)
 
@@ -78,7 +75,7 @@ class TestScamFilter(unittest.TestCase):
         self.assertEqual(out, [])
 
     def test_extra_patterns_extend_defaults(self):
-        f = ScamFilter(FakeConfig({
+        f = ScamFilter(_make_config({
             "enabled": True,
             "extra_patterns": ["nigerian prince"],
         }))
@@ -89,7 +86,7 @@ class TestScamFilter(unittest.TestCase):
         self.assertEqual(out, [])
 
     def test_override_patterns_replaces_defaults(self):
-        f = ScamFilter(FakeConfig({
+        f = ScamFilter(_make_config({
             "enabled": True,
             "override_patterns": ["only-this-one"],
             "flag_email_in_title": False,
@@ -129,7 +126,7 @@ class TestScamFilter(unittest.TestCase):
         self.assertEqual(out, [])
 
     def test_email_in_description_flag_respects_disabled(self):
-        f = ScamFilter(FakeConfig({"enabled": True, "flag_email_in_title": False}))
+        f = ScamFilter(_make_config({"enabled": True, "flag_email_in_title": False}))
         expose = _ka()
         expose["description"] = "Kontakt: real@landlord.de"
         out = list(f.process_exposes([expose]))

@@ -23,7 +23,7 @@ class OllamaFilter(Processor):
     DEFAULT_PROMPT = DEFAULT_PROMPT
 
     def __init__(self, config):
-        cfg = config.ollama_config() if hasattr(config, "ollama_config") else {}
+        cfg = config.ollama_config()
         self.url = cfg.get("url", DEFAULT_URL)
         self.model = cfg.get("model", DEFAULT_MODEL)
         self.client = OllamaClient(url=self.url, model=self.model)

@@ -1,4 +1,5 @@
 """Shared-scrape orchestrator: crawl once, fan out to every profile."""
+import logging
 import os
 import sys
 
@@ -17,7 +18,7 @@ def _write_profile(path, db, urls, extra=None):
         yaml.safe_dump(cfg, f)
 
 
-def _build(tmp_path):
+def _build(tmp_path, global_extra=None):
     single = str(tmp_path / "single.yaml")
     wg = str(tmp_path / "wg.yaml")
     _write_profile(single, str(tmp_path / "single" / "db.sqlite"),
@@ -31,7 +32,7 @@ def _build(tmp_path):
             "global": {
                 "database_location": str(tmp_path / "data" / "db.sqlite"),
                 "loop": {"active": False},
-                "urls": ["https://www.degewo.de/immosuche/"],
+                **(global_extra or {}),
             },
             "profiles": [single, wg],
         }, f)
@@ -39,14 +40,39 @@ def _build(tmp_path):
     return Orchestrator.from_file(hunter_yaml)
 
 
-def test_union_urls_dedup_and_extra(tmp_path):
+def test_union_urls_dedup(tmp_path):
     orch = _build(tmp_path)
     union = orch.lead.config.target_urls()
-    # degewo (global extra) + both profiles' URLs, wbm/x appearing once.
-    assert "https://www.degewo.de/immosuche/" in union
+    # Both profiles' URLs, wbm/x appearing once.
     assert union.count("https://www.wbm.de/x") == 1
     assert "https://www.gewobag.de/y" in union
     assert "https://www.howoge.de/z" in union
+
+
+def test_global_urls_ignored_with_warning(tmp_path, caplog):
+    # No profile would ever process a source only listed globally, so it is
+    # not crawled; the leftover key is reported once at startup.
+    with caplog.at_level(logging.WARNING, logger="flathunt"):
+        orch = _build(tmp_path, {"urls": ["https://www.degewo.de/immosuche/"]})
+    assert "https://www.degewo.de/immosuche/" not in orch.lead.config.target_urls()
+    assert [r for r in caplog.records if "global.urls is ignored" in r.getMessage()]
+
+
+def _telegram_profiles(tmp_path, monitoring):
+    return _build(tmp_path, {
+        "monitoring": monitoring,
+        "telegram": {"bot_token": "G", "receiver_ids": [1]},
+    })
+
+
+def test_crawler_down_channels_follow_alert_via_notifiers(tmp_path):
+    orch = _telegram_profiles(tmp_path, {"alert_via_notifiers": True})
+    assert [c.chat_ids for c in orch.lead._alert_notifiers] == [["1"]]
+
+
+def test_crawler_down_channels_off_without_alert_via_notifiers(tmp_path):
+    orch = _telegram_profiles(tmp_path, {})
+    assert orch.lead._alert_notifiers == []
 
 
 def test_run_once_dedups_and_fans_out(tmp_path):

@@ -78,13 +78,16 @@ class TestStallAlert(unittest.TestCase):
             json.dump({"Howoge": {"consecutive_empty": 0, "consecutive_alerts": 0}}, f)
         self.sent: list[str] = []
         self.ntfy: list[tuple[str, str]] = []
+        self.telegram_ok = True
+        self.ntfy_ok = True
         for patcher in (
             mock.patch.object(wd, "HUNTER_YAML", hunter_yaml),
             mock.patch.object(wd, "WATCHDOG_STATE", os.path.join(self.tmp.name, "wd.json")),
+            mock.patch.object(wd, "NTFY_URL", "https://ntfy.example/topic"),
             mock.patch.object(wd, "send_telegram",
-                              lambda token, ids, text: self.sent.append(text) or True),
+                              lambda token, ids, text: self.sent.append(text) or self.telegram_ok),
             mock.patch.object(wd, "send_ntfy",
-                              lambda title, text: self.ntfy.append((title, text)) or True),
+                              lambda title, text: self.ntfy.append((title, text)) or self.ntfy_ok),
             mock.patch.object(sys, "argv", ["crawler_watchdog.py"]),
         ):
             patcher.start()
@@ -113,15 +116,60 @@ class TestStallAlert(unittest.TestCase):
         self.assertTrue(self.sent[0].startswith(text))
         self.assertNotIn(wd.DEZSO_NOTE, text)
 
-    def test_down_crawler_alerts_once(self):
+    def test_stall_not_recorded_until_a_send_succeeds(self):
+        self._last_cycle_ago(wd.STALL_AFTER + 60)
+        self.telegram_ok = self.ntfy_ok = False  # e.g. the host's network is down
+        wd.main()
+        self.telegram_ok = True
+        wd.main()  # retried, now delivered
+        wd.main()  # handled: no third alert
+        self.assertEqual(len(self.sent), 2)
+
+    def test_stall_recorded_when_only_ntfy_succeeds(self):
+        self._last_cycle_ago(wd.STALL_AFTER + 60)
+        self.telegram_ok = False
+        wd.main()
+        wd.main()
+        self.assertEqual(len(self.ntfy), 1)
+
+    def _crawler_down(self, **health):
         with open(self.monitor, "w") as f:
             json.dump({"Wbm": {"consecutive_empty": 5, "consecutive_alerts": 1,
-                               "last_success_ts": 1000.0}}, f)
+                               "last_success_ts": 1000.0, **health}}, f)
+
+    def test_down_crawler_goes_to_ntfy_once_never_telegram(self):
+        # The hunter already alerts Telegram in-process; the watchdog must not
+        # duplicate that, only copy it to the maintainer's ntfy.
+        self._crawler_down()
         wd.main()
         wd.main()
-        self.assertEqual(len(self.sent), 1)
-        self.assertIn("Wbm", self.sent[0])
-        self.assertEqual(self.ntfy[0][0], "flathunter: crawler Wbm down")
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.ntfy), 1)
+        title, text = self.ntfy[0]
+        self.assertEqual(title, "flathunter: crawler Wbm down")
+        self.assertIn("0 results for 5 consecutive crawls", text)
+
+    def test_down_crawler_with_missing_fields_says_so(self):
+        self._crawler_down(consecutive_empty=0)
+        wd.main()
+        self.assertIn("miss critical fields", self.ntfy[0][1])
+        self.assertNotIn("0 results", self.ntfy[0][1])
+
+    def test_down_crawler_retried_after_failed_ntfy(self):
+        self._crawler_down()
+        self.ntfy_ok = False
+        wd.main()
+        self.ntfy_ok = True
+        wd.main()
+        wd.main()
+        self.assertEqual(len(self.ntfy), 2)
+
+    def test_down_crawler_without_ntfy_sends_nothing(self):
+        self._crawler_down()
+        with mock.patch.object(wd, "NTFY_URL", ""):
+            wd.main()
+        self.assertEqual((self.sent, self.ntfy), ([], []))
+        self.assertNotIn("shared:Wbm", wd.load_json(wd.WATCHDOG_STATE))
 
     def test_new_stall_after_recovery_alerts_again(self):
         self._last_cycle_ago(wd.STALL_AFTER + 600)

@@ -1,7 +1,8 @@
 """Tests for PolygonFilter"""
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.filters.polygon_filter import PolygonFilter
 
 # Small triangle around central Berlin (Mitte area)
@@ -27,9 +28,7 @@ EXPOSE_NO_ADDR = {
 
 
 def _make_config(polygon=None):
-    cfg = MagicMock()
-    cfg.search_polygon.return_value = polygon or BERLIN_MITTE_POLYGON
-    return cfg
+    return BerlinConfig({"search_area": {"polygon": polygon or BERLIN_MITTE_POLYGON}})
 
 
 def _make_filter(polygon=None):

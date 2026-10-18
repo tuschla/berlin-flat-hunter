@@ -1,8 +1,14 @@
 # TODO
 
 ## Open
-- **G5 verify — WBM form-answer field IDs (jakob live-applies to WBM).** jakob's
-  `send_modes` are wbm/gewobag/howoge = **live**. Howoge auto-submit is verified
+- **Auto-apply is dormant.** Every live profile has `auto_apply.enabled: false`,
+  so no applicator is built and jakob's `send_modes` (wbm/gewobag/howoge =
+  live) do nothing. Before switching it back on: check a confirmation marker
+  after submit (`applicator.py` Gewobag/WBM/Howoge submit paths), fill WBS radio
+  and checkbox fields as such (not as text), send manual-apply alerts even
+  without `monitoring.alert_via_notifiers`, and fix the `wbs_available`
+  (config.example) vs `wbs_present` (code) key mismatch.
+- **G5 verify — WBM form-answer field IDs.** Howoge auto-submit was verified
   working (16-field payload, 2026-07-27). WBM could NOT be verified because the
   WBM list fetch was bot-checked (401) that day. `form_answers.salutation: "Herr"`
   was added to jakob so WBM/Gewobag get *Anrede*, but the powermail field id is

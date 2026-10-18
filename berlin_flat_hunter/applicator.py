@@ -846,15 +846,12 @@ class AutoApplicator(Processor):
     def __init__(self, config, alert_dispatch: Optional[Callable[[list[str]], None]] = None,
                  store=None, alias_resolver=None, user_id: str = "default"):
         self.config = config
-        applicant = config.applicant_config() if hasattr(config, "applicant_config") else {}
+        applicant = config.applicant_config()
         # Base applicant data; the recipient email is swapped per-alias when an
         # AliasResolver yields more than one address for a landlord.
         self._base_applicant = dict(applicant)
-        apply_cfg = getattr(config, "config", {}).get("auto_apply", {})
+        apply_cfg = config.config.get("auto_apply", {})
         dry_run = bool(apply_cfg.get("dry_run", False))
-        # Fallback when the config predates per-source modes (e.g. a plain
-        # YamlConfig in tests): the legacy single dry_run flag.
-        self._default_dry_run = dry_run
         # Optional per-profile Store (send dedup) + AliasResolver (addy.io
         # multi-email). Both None => classic single-application behaviour.
         self._store = store
@@ -874,7 +871,7 @@ class AutoApplicator(Processor):
         # Application-questionnaire answers (WBS/income/salutation/consent). Only
         # WbmApplicator consumes them today; attach to all so the interface is
         # uniform and future appliers can use them.
-        form_answers = config.form_answers() if hasattr(config, "form_answers") else {}
+        form_answers = config.form_answers()
         for applicator in self.applicators:
             applicator.form_answers = form_answers
         self.gate = None
@@ -888,13 +885,9 @@ class AutoApplicator(Processor):
 
     def process_expose(self, expose: dict) -> dict:
         # Per-source send mode: off = never apply, dry_run = fill but don't
-        # submit, live = submit. Falls back to the legacy global dry_run flag
-        # for configs that don't expose send_mode_for.
+        # submit, live = submit.
         crawler = expose.get("crawler", "") or ""
-        if hasattr(self.config, "send_mode_for"):
-            mode = self.config.send_mode_for(crawler)
-        else:
-            mode = "dry_run" if self._default_dry_run else "live"
+        mode = self.config.send_mode_for(crawler)
         if mode == "off":
             return expose
         if self.gate is not None and not self.gate.should_apply(expose):

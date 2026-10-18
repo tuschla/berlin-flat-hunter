@@ -6,6 +6,7 @@ import unittest
 import requests
 import requests_mock as req_mock
 
+from berlin_flat_hunter.crawlers.common import listing_id
 from berlin_flat_hunter.crawlers.gewobag import Gewobag, WP_API_URL
 
 FIXTURE_INDEX = os.path.join(os.path.dirname(__file__), "fixtures", "gewobag_index.json")
@@ -80,11 +81,22 @@ class TestGewobagCrawler(unittest.TestCase):
         for key in ("id", "url", "title", "address", "rooms", "size", "price", "crawler"):
             self.assertIn(key, results[0])
 
-    def test_id_is_int_from_api(self):
+    def test_id_is_listing_id_of_url(self):
         with req_mock.Mocker() as m:
             _register_mocks(m)
             results = self.crawler.get_results(SEARCH_URL)
-        self.assertIsInstance(results[0]["id"], int)
+        for r in results:
+            self.assertEqual(r["id"], listing_id(r["url"]))
+
+    def test_id_stable_when_api_id_changes(self):
+        changed = [dict(item, id=item["id"] + 1000) for item in _index()]
+        with req_mock.Mocker() as m:
+            _register_mocks(m)
+            before = sorted(r["id"] for r in self.crawler.get_results(SEARCH_URL))
+        with req_mock.Mocker() as m:
+            _register_mocks(m, index=changed)
+            after = sorted(r["id"] for r in self.crawler.get_results(SEARCH_URL))
+        self.assertEqual(before, after)
 
     def test_address_parsed_from_detail(self):
         with req_mock.Mocker() as m:
@@ -105,11 +117,14 @@ class TestGewobagCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertTrue(any(r["size"] for r in results))
 
-    def test_price_prefers_grundmiete(self):
+    def test_price_is_gesamtmiete(self):
         with req_mock.Mocker() as m:
             _register_mocks(m)
             results = self.crawler.get_results(SEARCH_URL)
-        self.assertTrue(any("1.460" in r["price"] for r in results))
+        self.assertTrue(results)
+        for r in results:
+            self.assertIn("1.871,51", r["price"])
+            self.assertEqual(r["price"], r["price_warm"])
 
     def test_price_cold_is_grundmiete(self):
         with req_mock.Mocker() as m:
@@ -129,16 +144,11 @@ class TestGewobagCrawler(unittest.TestCase):
             results = self.crawler.get_results(SEARCH_URL)
         self.assertTrue(any(r["image"] for r in results))
 
-    def test_auf_anfrage_leaves_cold_warm_empty(self):
-        """Teaser listings show 'Auf Anfrage' — cold/warm must stay empty so the
-        stats backfill can fill them once the real figures appear."""
+    def _single(self, rows):
         item = {"id": 999, "slug": "teaser",
                 "link": "https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/teaser/",
                 "title": {"rendered": "Neubauwohnung nur mit WBS"}}
-        detail = ("<html><body><table class='overview-table'>"
-                  "<tr><th>Grundmiete</th><td>Auf Anfrage</td></tr>"
-                  "<tr><th>Anschrift</th><td>,</td></tr>"
-                  "</table></body></html>")
+        detail = f"<html><body><table class='overview-table'>{rows}</table></body></html>"
         with req_mock.Mocker() as m:
             m.register_uri(req_mock.GET, WP_API_URL,
                            [{"json": [item], "status_code": 200},
@@ -146,9 +156,24 @@ class TestGewobagCrawler(unittest.TestCase):
             m.register_uri(req_mock.GET, item["link"], text=detail, status_code=200)
             results = self.crawler.get_results(SEARCH_URL)
         self.assertEqual(len(results), 1)
-        self.assertEqual(results[0]["price_cold"], "")
-        self.assertEqual(results[0]["price_warm"], "")
-        self.assertEqual(results[0]["price"], "Auf Anfrage")  # legacy field keeps it
+        return results[0]
+
+    def test_auf_anfrage_leaves_prices_empty(self):
+        """Teaser listings show 'Auf Anfrage' — every price field must stay empty
+        so the stats backfill can fill them once the real figures appear."""
+        result = self._single("<tr><th>Grundmiete</th><td>Auf Anfrage</td></tr>"
+                              "<tr><th>Gesamtmiete</th><td>Auf Anfrage</td></tr>"
+                              "<tr><th>Anschrift</th><td>,</td></tr>")
+        self.assertEqual(result["price_cold"], "")
+        self.assertEqual(result["price_warm"], "")
+        self.assertEqual(result["price"], "")
+
+    def test_price_falls_back_to_grundmiete_without_gesamtmiete_amount(self):
+        result = self._single("<tr><th>Grundmiete</th><td>551,60 Euro</td></tr>"
+                              "<tr><th>Gesamtmiete</th><td>Auf Anfrage</td></tr>")
+        self.assertEqual(result["price"], "551,60 Euro")
+        self.assertEqual(result["price_cold"], "551,60 Euro")
+        self.assertEqual(result["price_warm"], "")
 
     def test_detail_404_excluded(self):
         with req_mock.Mocker() as m:

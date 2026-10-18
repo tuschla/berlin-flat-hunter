@@ -1,70 +1,38 @@
-"""Expose-id coercion: keep flathunter's int(id) from crashing on string ids."""
-import os
-import sys
+"""Listing identity: crawlers derive ids from the detail URL (crawlers.common.listing_id)."""
+import zlib
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from berlin_flat_hunter.hunter import _coerce_expose_id  # noqa: E402
+import pytest
 
-
-def test_int_id_untouched():
-    e = {"id": 123, "url": "u"}
-    _coerce_expose_id(e)
-    assert e["id"] == 123
+from berlin_flat_hunter.crawlers.common import listing_id
 
 
-def test_numeric_string_untouched():
-    e = {"id": "456", "url": "u"}
-    _coerce_expose_id(e)
-    assert int(e["id"]) == 456
+# (url, id stored live in stats.db / the profiles' `processed` tables). The
+# derivation must never change, or every live listing notifies again.
+LIVE_IDS = [
+    ("https://www.gewobag.de/fuer-mietinteressentinnen/mietangebote/0100-02101-0302-0120/",
+     3153038178),
+    ("https://www.howoge.de/immobiliensuche/wohnungssuche/detail/1771-12738-41.html",
+     1658554473),
+    ("https://www.wbm.de/wohnungen-berlin/angebote/details/3-zim-wohnung-in-kreuzberg/",
+     3409408620),
+]
 
 
-def test_string_id_coerced_stable_and_int():
-    e1 = {"id": "W1300.42303.0131-0504", "url": "u"}
-    e2 = dict(e1)
-    _coerce_expose_id(e1)
-    _coerce_expose_id(e2)
-    assert isinstance(e1["id"], int) and e1["id"] >= 0
-    assert e1["id"] == e2["id"]           # stable → cross-cycle dedup preserved
-    assert int(e1["id"]) == e1["id"]      # int-coercible (won't crash save_expose)
+@pytest.mark.parametrize("url,stored", LIVE_IDS)
+def test_matches_ids_already_stored(url, stored):
+    assert listing_id(url) == stored
 
 
-def test_missing_id_falls_back_to_url():
-    e = {"url": "http://x/1"}
-    _coerce_expose_id(e)
-    assert isinstance(e["id"], int)
+def test_trailing_slash_irrelevant():
+    url = "https://www.degewo.de/immosuche/details/nachmieter-gesucht-30"
+    assert listing_id(url) == listing_id(url + "/") == zlib.crc32(b"nachmieter-gesucht-30")
 
 
-def test_idempotent():
-    e = {"id": "slug-abc", "url": "u"}
-    _coerce_expose_id(e)
-    first = e["id"]
-    _coerce_expose_id(e)
-    assert e["id"] == first
+def test_query_style_detail_urls_stay_distinct():
+    base = "https://www.degewo.de/immosuche/details?tx_openimmo_immobilie%5Bimmobilie%5D="
+    assert listing_id(base + "2940") != listing_id(base + "2941")
 
 
-def test_url_keyed_crawler_id_from_slug_not_uid():
-    import zlib
-
-    # Same WBM listing, DIFFERENT volatile data-uid on two crawls -> same id,
-    # because identity comes from the URL slug, not the uid.
-    url = "https://www.wbm.de/wohnungen-berlin/angebote/details/1-zimmer-in-mitte/"
-    e1 = {"id": 77574, "crawler": "Wbm", "url": url}
-    e2 = {"id": 99999, "crawler": "Wbm", "url": url}
-    _coerce_expose_id(e1)
-    _coerce_expose_id(e2)
-    assert e1["id"] == e2["id"] == zlib.crc32(b"1-zimmer-in-mitte")
-
-
-def test_url_keyed_applies_to_all_genossenschaften():
-    for crawler in ("Gewobag", "Howoge", "Gesobau", "Wbm"):
-        e = {"id": "volatile-uid", "crawler": crawler, "url": "https://x/y/the-flat/"}
-        _coerce_expose_id(e)
-        assert isinstance(e["id"], int)
-        assert e["id"] == __import__("zlib").crc32(b"the-flat")
-
-
-def test_stable_uid_crawler_untouched():
-    # Kleinanzeigen has a stable numeric id — keep it.
-    e = {"id": 3430781419, "crawler": "Kleinanzeigen", "url": "https://ka/x"}
-    _coerce_expose_id(e)
-    assert e["id"] == 3430781419
+def test_id_fits_flathunter_integer_columns():
+    i = listing_id("https://www.wbm.de/x/some-flat/")
+    assert isinstance(i, int) and 0 <= i < 2 ** 32

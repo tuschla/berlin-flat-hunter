@@ -64,12 +64,6 @@ class BerlinConfig(YamlConfig):
     def monitoring_config(self) -> dict:
         return self.config.get("monitoring", {})
 
-    def stats_enabled(self) -> bool:
-        return bool(self.config.get("statistics", {}).get("enabled", False))
-
-    def stats_db_path(self) -> str:
-        return self.config.get("statistics", {}).get("db_path", "")
-
     def scam_filter_enabled(self) -> bool:
         return bool(self.config.get("scam_filter", {}).get("enabled", False))
 
@@ -134,7 +128,7 @@ class BerlinConfig(YamlConfig):
 
     def state_db_path(self) -> str:
         """Per-profile SQLite for alias/send/imap dedup state. Defaults next to
-        the main DB (alongside stats.db / schema_monitor.json)."""
+        the main DB."""
         configured = self.config.get("state_db_path", "")
         if configured:
             return configured

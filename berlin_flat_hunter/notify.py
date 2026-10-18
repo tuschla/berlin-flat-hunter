@@ -6,10 +6,9 @@ bot + chat list, :class:`BerlinNotifier` routes each listing to a bot/chat that
 belongs to the listing's *source* (crawler), so notifications from e.g. Gewobag
 and Kleinanzeigen can land in different Telegram channels.
 
-- :class:`TelegramNotifier` is a minimal Telegram Bot API client (ported from
-  ``pi_flathuntbot/server/flathunt_server/notifier.py`` but using ``requests``
-  instead of ``httpx``). It fans a single message out to one or more chat ids
-  and chunks long messages.
+- :class:`TelegramNotifier` is a minimal Telegram Bot API client, the one used
+  for listings, alerts and the watchdog. It fans a single message out to one
+  or more chat ids and chunks long messages.
 - :class:`BerlinNotifier` is the flathunter ``Processor`` that formats each
   expose with the same template flathunter uses and routes it to the right bot.
   It also offers :meth:`BerlinNotifier.send_heartbeat` for a per-cycle status
@@ -106,6 +105,10 @@ class TelegramNotifier:
                 if not self._post_with_retry(url, payload):
                     ok = False
         return ok
+
+    def notify(self, message: str) -> bool:
+        """Alert-channel interface (``.notify(msg)``, as flathunter's senders)."""
+        return self.send(message)
 
     def _post_with_retry(self, url: str, payload: dict) -> bool:
         """POST one chunk, retrying transient failures (network / 429 / 5xx).
@@ -283,19 +286,6 @@ class BerlinNotifier(Processor):
                           expose.get("id"), exc)
             # Always pass the expose downstream (auto-applicator, etc.).
             yield expose
-
-    def process_expose(self, expose: Dict) -> Dict:
-        """Send a notification for a single expose and return it unchanged."""
-        crawler = str(expose.get("crawler", "") or "")
-        token, chats = self._route(crawler)
-        notifier = self._notifier_for(token, chats)
-        try:
-            if notifier.send(self._get_text_message(expose)):
-                self.sent_count += 1
-        except Exception as exc:  # noqa: BLE001
-            log.error("Notification failed for expose %s: %s",
-                      expose.get("id"), exc)
-        return expose
 
     # -- heartbeat ---------------------------------------------------------
 

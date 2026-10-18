@@ -44,6 +44,8 @@ class FakeIMAP:
     mails: list[bytes] = []
     raise_on_connect = None
     last_search = None
+    last_select = None
+    fetch_parts: list[str] = []
 
     def __init__(self, host, port, timeout=None):
         if FakeIMAP.raise_on_connect is not None:
@@ -59,7 +61,8 @@ class FakeIMAP:
     def login(self, username, password):
         return ("OK", [b"logged in"])
 
-    def select(self, mailbox="INBOX"):
+    def select(self, mailbox="INBOX", readonly=False):
+        FakeIMAP.last_select = (mailbox, readonly)
         return ("OK", [str(len(self._by_id)).encode()])
 
     def search(self, charset, *criteria):
@@ -67,10 +70,11 @@ class FakeIMAP:
         return ("OK", [b" ".join(self._by_id.keys())])
 
     def fetch(self, msg_id, message_parts):
+        FakeIMAP.fetch_parts.append(message_parts)
         raw = self._by_id.get(msg_id)
         if raw is None:
             return ("NO", [None])
-        return ("OK", [(b"1 (RFC822 {%d}" % len(raw), raw)])
+        return ("OK", [(b"1 (BODY[] {%d}" % len(raw), raw)])
 
     def logout(self):
         return ("BYE", [b"bye"])
@@ -81,6 +85,8 @@ def _reset_fake():
     FakeIMAP.mails = []
     FakeIMAP.raise_on_connect = None
     FakeIMAP.last_search = None
+    FakeIMAP.last_select = None
+    FakeIMAP.fetch_parts = []
     yield
     FakeIMAP.mails = []
     FakeIMAP.raise_on_connect = None
@@ -128,6 +134,28 @@ def test_disabled_config_returns_empty(patch_imap, capture_get):
     confirmer = ImapConfirmer(_cfg(enabled=False))
     assert confirmer.scan() == ([], [])
     assert capture_get == []
+
+
+def test_scan_never_marks_mail_as_read(patch_imap, capture_get):
+    """The scan runs every cycle against the user's real inbox: mailbox opened
+    read-only and bodies fetched with PEEK, so no \\Seen flag is ever set."""
+    FakeIMAP.mails = [_make_mail("info@howoge.de", "Hallo", "Text")]
+    ImapConfirmer(_cfg(mailbox="INBOX")).scan()
+    assert FakeIMAP.last_select == ("INBOX", True)
+    assert FakeIMAP.fetch_parts == ["(BODY.PEEK[])"]
+
+
+def test_search_filters_genossenschaft_senders_on_server(patch_imap, capture_get):
+    ImapConfirmer(_cfg()).scan()
+    criteria = list(FakeIMAP.last_search)
+    assert criteria[0] == "SINCE"
+    domains = imap_reader._GENO_DOMAINS
+    from_keys = criteria[2:]
+    # n domains -> n-1 binary ORs, each domain once as FROM "<domain>"
+    assert from_keys.count("OR") == len(domains) - 1
+    assert [from_keys[i + 1] for i, k in enumerate(from_keys) if k == "FROM"] == \
+        [f'"{d}"' for d in domains]
+    assert from_keys[-2:] == ["FROM", f'"{domains[-1]}"']
 
 
 def test_missing_credentials_returns_empty(patch_imap, capture_get):

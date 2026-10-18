@@ -23,13 +23,13 @@ from berlin_flat_hunter.filters.keywords import wbs_required
 
 class WbsFilter(Processor):
     def __init__(self, config):
-        setting = config.wbs_required_setting() if hasattr(config, "wbs_required_setting") else None
+        setting = config.wbs_required_setting()
         # Active only when the applicant explicitly has NO WBS (False).
         self.active = setting is False
 
     @staticmethod
     def enabled_for(config) -> bool:
-        setting = config.wbs_required_setting() if hasattr(config, "wbs_required_setting") else None
+        setting = config.wbs_required_setting()
         return setting is False
 
     def process_exposes(self, exposes) -> Iterator[dict]:  # type: ignore[override]

@@ -6,30 +6,53 @@ import unittest
 from unittest.mock import MagicMock
 
 import requests.exceptions
+import requests_mock as req_mock
+from flathunter.idmaintainer import IdMaintainer
 
+from berlin_flat_hunter.config import BerlinConfig
 from berlin_flat_hunter.hunter import BerlinHunter
 
 
+class _FakeSearcher:
+    """Plain (non-Selenium) crawler stand-in."""
+
+    def __init__(self, name: str, url_pattern: str, items=None, exc=None):
+        self._name = name
+        self.URL_PATTERN = re.compile(url_pattern)
+        self.items = items or []
+        self.exc = exc
+
+    def get_name(self):
+        return self._name
+
+    def crawl(self, url, max_pages=None):
+        if self.exc is not None:
+            raise self.exc
+        return list(self.items)
+
+
+class _Channel:
+    """Alert channel stand-in (the `.notify(msg)` interface)."""
+
+    def __init__(self, fail=False):
+        self.messages: list[str] = []
+        self.fail = fail
+
+    def notify(self, message):
+        self.messages.append(message)
+        if self.fail:
+            raise RuntimeError("send failed")
+
+
 def _make_searcher(name: str, url_pattern: str):
-    s = MagicMock()
-    s.get_name.return_value = name
-    s.URL_PATTERN = re.compile(url_pattern)
-    return s
+    return _FakeSearcher(name, url_pattern)
 
 
-def _make_config(target_urls=None, searchers=None, db_path=None, **flags):
-    cfg = MagicMock()
-    cfg.config = {}
-    cfg.target_urls.return_value = target_urls or []
-    cfg.searchers.return_value = searchers or []
-    cfg.database_location.return_value = db_path or "/tmp/test_hunter.db"
-    cfg.polygon_filter_enabled.return_value = flags.get("polygon", False)
-    cfg.plz_filter_enabled.return_value = flags.get("plz", False)
-    cfg.ollama_enabled.return_value = flags.get("ollama", False)
-    cfg.auto_apply_enabled.return_value = flags.get("apply", False)
-    cfg.stats_enabled.return_value = flags.get("stats", False)
-    cfg.stats_db_path.return_value = ""
-    return cfg
+def _build_hunter(tmpdir, target_urls, searchers, **extra) -> BerlinHunter:
+    db = os.path.join(tmpdir, "db.sqlite")
+    cfg = BerlinConfig({"database_location": db, "urls": target_urls, **extra})
+    cfg.set_searchers(searchers)
+    return BerlinHunter(cfg, IdMaintainer(db))
 
 
 class TestRecordHealth(unittest.TestCase):
@@ -43,17 +66,7 @@ class TestRecordHealth(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_hunter(self, target_urls, searchers):
-        cfg = _make_config(target_urls=target_urls, searchers=searchers, db_path=self.db_path)
-        # Bypass flathunter Hunter.__init__ check that requires YamlConfig
-        hunter = BerlinHunter.__new__(BerlinHunter)
-        hunter.config = cfg
-        hunter.berlin_config = cfg
-        hunter.id_watch = MagicMock()
-        from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
-        hunter.schema_monitor = SchemaMonitor(
-            os.path.join(self._tmpdir, "monitor.json"), {}
-        )
-        return hunter
+        return _build_hunter(self._tmpdir, target_urls, searchers)
 
     def test_skips_crawlers_with_no_matching_urls(self):
         """Unused crawlers (no matching URL) must NOT be tracked as empty crawls."""
@@ -107,11 +120,11 @@ class TestRecordHealth(unittest.TestCase):
         # Force the schema monitor to emit an alert
         hunter.schema_monitor.record_crawl = MagicMock(return_value=["[SCHEMA ALERT] test"])
         hunter.schema_monitor.record_empty_crawl = MagicMock(return_value=[])
-        notifier_a, notifier_b = MagicMock(), MagicMock()
-        hunter._alert_notifiers = [notifier_a, notifier_b]
+        channel_a, channel_b = _Channel(), _Channel()
+        hunter._alert_notifiers = [channel_a, channel_b]
         hunter._record_health([])
-        notifier_a.notify.assert_called_once_with("[SCHEMA ALERT] test")
-        notifier_b.notify.assert_called_once_with("[SCHEMA ALERT] test")
+        self.assertEqual(channel_a.messages, ["[SCHEMA ALERT] test"])
+        self.assertEqual(channel_b.messages, ["[SCHEMA ALERT] test"])
 
     def test_no_alerts_no_notifier_calls(self):
         gewobag = _make_searcher("Gewobag", r"https://www\.gewobag\.de")
@@ -121,10 +134,10 @@ class TestRecordHealth(unittest.TestCase):
         )
         hunter.schema_monitor.record_crawl = MagicMock(return_value=[])
         hunter.schema_monitor.record_empty_crawl = MagicMock(return_value=[])
-        notifier = MagicMock()
-        hunter._alert_notifiers = [notifier]
+        channel = _Channel()
+        hunter._alert_notifiers = [channel]
         hunter._record_health([])
-        notifier.notify.assert_not_called()
+        self.assertEqual(channel.messages, [])
 
     def test_notifier_exception_does_not_break_loop(self):
         gewobag = _make_searcher("Gewobag", r"https://www\.gewobag\.de")
@@ -134,12 +147,10 @@ class TestRecordHealth(unittest.TestCase):
         )
         hunter.schema_monitor.record_crawl = MagicMock(return_value=["alert"])
         hunter.schema_monitor.record_empty_crawl = MagicMock(return_value=[])
-        bad = MagicMock()
-        bad.notify.side_effect = RuntimeError("send failed")
-        good = MagicMock()
+        bad, good = _Channel(fail=True), _Channel()
         hunter._alert_notifiers = [bad, good]
         hunter._record_health([])  # must not raise
-        good.notify.assert_called_once()
+        self.assertEqual(good.messages, ["alert"])
 
 
 class TestDriverRecycle(unittest.TestCase):
@@ -161,17 +172,7 @@ class TestDriverRecycle(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_hunter(self, searchers, target_urls):
-        cfg = _make_config(target_urls=target_urls, searchers=searchers, db_path=self.db_path)
-        hunter = BerlinHunter.__new__(BerlinHunter)
-        hunter.config = cfg
-        hunter.berlin_config = cfg
-        hunter.id_watch = MagicMock()
-        from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
-        hunter.schema_monitor = SchemaMonitor(
-            os.path.join(self._tmpdir, "monitor.json"), {}
-        )
-        hunter._driver_last_recycled = {}
-        return hunter
+        return _build_hunter(self._tmpdir, target_urls, searchers)
 
     def _webdriver_searcher(self, name: str, url_pattern: str):
         """Mock searcher that mimics WebdriverCrawler — has a .driver attribute
@@ -193,7 +194,6 @@ class TestDriverRecycle(unittest.TestCase):
         results = list(hunter.crawl_for_exposes())
         self.assertEqual(results, [])
         self.assertIsNone(searcher.driver)
-        searcher.driver.quit if False else None  # satisfy lint
 
     def test_urllib3_max_retry_nulls_driver(self):
         """urllib3.MaxRetryError (sibling of requests.ConnectionError, not subclass)
@@ -267,8 +267,8 @@ class TestDriverRecycle(unittest.TestCase):
         from selenium.common.exceptions import WebDriverException
         ka = self._webdriver_searcher("Kleinanzeigen", r"https://kleinanzeigen\.de")
         ka.crawl.side_effect = WebDriverException("dead")
-        gewobag = _make_searcher("Gewobag", r"https://www\.gewobag\.de")
-        gewobag.crawl.return_value = [{"crawler": "Gewobag", "title": "Y"}]
+        gewobag = _FakeSearcher("Gewobag", r"https://www\.gewobag\.de",
+                                items=[{"crawler": "Gewobag", "title": "Y"}])
         hunter = self._make_hunter(
             [ka, gewobag],
             ["https://kleinanzeigen.de/x", "https://www.gewobag.de/y"],
@@ -293,18 +293,7 @@ class TestTotalFailure(unittest.TestCase):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _make_hunter(self, searchers, target_urls):
-        cfg = _make_config(target_urls=target_urls, searchers=searchers, db_path=self.db_path)
-        hunter = BerlinHunter.__new__(BerlinHunter)
-        hunter.config = cfg
-        hunter.berlin_config = cfg
-        hunter.id_watch = MagicMock()
-        from berlin_flat_hunter.monitoring.schema_monitor import SchemaMonitor
-        hunter.schema_monitor = SchemaMonitor(
-            os.path.join(self._tmpdir, "monitor.json"), {}
-        )
-        hunter._alert_notifiers = []
-        hunter._driver_last_recycled = {}
-        return hunter
+        return _build_hunter(self._tmpdir, target_urls, searchers)
 
     def test_inner_exception_records_all_configured_empty(self):
         gewobag = _make_searcher("Gewobag", r"https://www\.gewobag\.de")
@@ -329,13 +318,89 @@ class TestTotalFailure(unittest.TestCase):
         hunter = self._make_hunter(
             [gewobag], target_urls=["https://www.gewobag.de/x"],
         )
-        notifier = MagicMock()
-        hunter._alert_notifiers = [notifier]
+        channel = _Channel()
+        hunter._alert_notifiers = [channel]
         hunter._hunt_flats_inner = MagicMock(side_effect=RuntimeError("dead"))
         # Default threshold is 3 consecutive empties → 3 cycles trigger alert
         for _ in range(3):
             hunter.hunt_flats()
-        self.assertTrue(notifier.notify.called)
+        self.assertEqual(len(channel.messages), 1)
+
+
+class TestSiteReportedEmpty(unittest.TestCase):
+
+    def test_site_reported_empty_is_healthy(self):
+        tmp_obj = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp_obj.cleanup)
+        tmp = tmp_obj.name
+        wbm = _FakeSearcher("Wbm", r"https://www\.wbm\.de")
+        wbm.last_crawl_site_reported_empty = True
+        gewobag = _FakeSearcher("Gewobag", r"https://www\.gewobag\.de")
+        hunter = _build_hunter(tmp, ["https://www.wbm.de/x", "https://www.gewobag.de/y"],
+                               [wbm, gewobag])
+        hunter._record_health([])
+        health = hunter.schema_monitor.get_health_summary()
+        self.assertEqual(health["Wbm"]["consecutive_empty"], 0)
+        self.assertEqual(health["Gewobag"]["consecutive_empty"], 1)
+
+
+TELEGRAM_URL = "https://api.telegram.org/botTOK/sendMessage"
+
+
+class TestPerListingNotifiers(unittest.TestCase):
+    """`notifiers` decides whether listings are sent; alert channels don't."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _hunter(self, notifiers):
+        hunter = _build_hunter(
+            self._tmpdir, ["https://www.wbm.de/x"],
+            [_FakeSearcher("Wbm", r"https://www\.wbm\.de")],
+            notifiers=notifiers,
+            telegram={"bot_token": "TOK", "receiver_ids": [42]},
+            monitoring={"alert_via_notifiers": True, "alert_notifiers": ["telegram"]},
+        )
+        self.addCleanup(hunter.close)
+        return hunter
+
+    def _listing(self):
+        return {"crawler": "Wbm", "id": 7, "title": "Wohnung", "url": "https://www.wbm.de/a",
+                "address": "Straße 1", "price": "500 €", "description": ""}
+
+    def test_empty_notifiers_sends_no_listing(self):
+        hunter = self._hunter([])
+        with req_mock.Mocker() as m:
+            m.post(TELEGRAM_URL, json={"ok": True})
+            result = hunter.process_raw([self._listing()])
+        self.assertEqual(len(result), 1)  # still processed (marked seen, applied, ...)
+        self.assertEqual(m.request_history, [])
+
+    def test_empty_notifiers_keeps_alert_channel(self):
+        hunter = self._hunter([])
+        with req_mock.Mocker() as m:
+            m.post(TELEGRAM_URL, json={"ok": True})
+            hunter._dispatch_alerts(["[SCHEMA ALERT] Wbm down"])
+        self.assertEqual(len(m.request_history), 1)
+        self.assertIn("Wbm+down", m.request_history[0].text)
+
+    def test_telegram_notifier_sends_listing(self):
+        hunter = self._hunter(["telegram"])
+        with req_mock.Mocker() as m:
+            m.post(TELEGRAM_URL, json={"ok": True})
+            hunter.process_raw([self._listing()])
+        self.assertEqual(len(m.request_history), 1)
+        self.assertIn("Wohnung", m.request_history[0].text)
+
+    def test_profile_hunter_builds_no_schema_monitor(self):
+        hunter = self._hunter([])
+        hunter.process_raw([self._listing()])
+        self.assertNotIn("schema_monitor", vars(hunter))
+        self.assertFalse(os.path.exists(os.path.join(self._tmpdir, "schema_monitor.json")))
 
 
 if __name__ == "__main__":
