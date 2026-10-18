@@ -29,6 +29,7 @@ x-common: &common
   restart: unless-stopped
   environment:
     TZ: Europe/Berlin
+    # Plain ntfy topic URL (https://host/topic), not the TrueNAS alert service's Slack-style URL.
     NTFY_URL: "CHANGE_ME_NTFY_TOPIC_URL"
   volumes:
     - /mnt/nvme0/apps/flathunter/config/hunter.yaml:/app/hunter.yaml:ro
