@@ -253,8 +253,10 @@ class BerlinHunter(Hunter):
             return
         name = searcher.get_name()
         now = time.monotonic()
-        last = self._driver_last_recycled.get(name, 0.0)
-        if not force and (now - last) < _DRIVER_RECYCLE_MIN_INTERVAL:
+        last = self._driver_last_recycled.get(name)
+        # No previous recycle: never rate-limit (monotonic() counts from boot,
+        # so a 0.0 default would block recycling right after a host restart).
+        if not force and last is not None and (now - last) < _DRIVER_RECYCLE_MIN_INTERVAL:
             return
         driver = searcher.driver
         if driver is not None:
