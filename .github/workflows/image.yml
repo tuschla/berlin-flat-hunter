@@ -3,6 +3,13 @@ name: image
 on:
   push:
     branches: [main]
+    # The image doesn't change when only these change. Rest of deploy/ (crontab,
+    # entrypoint.sh, run-job.sh) is copied into the image, so it still triggers.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+      - 'deploy/truenas-app.yaml'
   workflow_dispatch:
 
 permissions:
